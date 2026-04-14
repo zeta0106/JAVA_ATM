@@ -4,9 +4,18 @@
 个部分：
 ------------------------------------------------------------------------
 
-工程名：
-工程的目标：
-版本或者日期：
-如何启动这个工程：
-作者
-使用指南：
+## 📂 Class Overview
+- `Account.java` – Represents a bank account
+- `ATM.java` – Main ATM logic
+- `BankDatabase.java` – Stores account data
+- `Transaction.java` – Abstract base for transactions
+- `Withdrawal.java` – Handles withdrawals
+- `Transfer.java` – Handles transfers
+- `BalanceInquiry.java` – Displays balance
+- `CashDispenser.java` – Simulates cash dispensing
+- `Keypad.java` – User input
+- `Screen.java` – Output display
+
+## 🛠 Requirements
+- Java JDK 17+  
+- BlueJ (optional, for project visualization)
