@@ -8,7 +8,8 @@ public class Withdrawal extends Transaction
    private CashDispenser cashDispenser; // reference to cash dispenser
 
    // constant corresponding to menu option to cancel
-   private final static int CANCELED = 6;
+   private final static int CANCELED = 7;
+   private final static int OTHER_AMOUNT = 6;
 
    // Withdrawal constructor
    public Withdrawal( int userAccountNumber, Screen atmScreen, 
@@ -110,7 +111,7 @@ public class Withdrawal extends Transaction
          screen.displayMessageLine( "\nWithdrawal Currency:" );
          screen.displayMessageLine( "1 - HKD" );
          screen.displayMessageLine( "2 - RMB" );
-         screen.displayMessageLine( "6 - Cancel transaction" );
+         screen.displayMessageLine( "7 - Cancel transaction" );
          screen.displayMessage( "\nChoose a currency: " );
 
          int input = keypad.getInput();
@@ -136,11 +137,11 @@ public class Withdrawal extends Transaction
       // array of amounts to correspond to menu numbers
       int amounts[];
       if (currency.equals("HKD"))
-         amounts = new int[] { 0, 100, 500, 1000, 2000, 5000 };
+         amounts = new int[] { 0, 100, 200, 400, 800, 1000 };
       else // RMB
-         amounts = new int[] { 0, 100, 200, 500, 1000, 2000 };
+         amounts = new int[] { 0, 100, 200, 400, 800, 1000 };
 
-      String symbol = currency.equals("HKD") ? "HK$" : "RMB";
+      String symbol = currency.equals("HKD") ? "HK$" : "RMB ";
 
       // loop while no valid choice has been made
       while ( userChoice == 0 )
@@ -152,7 +153,8 @@ public class Withdrawal extends Transaction
          screen.displayMessageLine( "3 - " + symbol + amounts[3] );
          screen.displayMessageLine( "4 - " + symbol + amounts[4] );
          screen.displayMessageLine( "5 - " + symbol + amounts[5] );
-         screen.displayMessageLine( "6 - Cancel transaction" );
+         screen.displayMessageLine( "6 - Other Amount" );
+         screen.displayMessageLine( "7 - Cancel transaction" );
          screen.displayMessage( "\nChoose a withdrawal amount: " );
 
          int input = keypad.getInput(); // get user input through keypad
@@ -166,11 +168,14 @@ public class Withdrawal extends Transaction
             case 4:
             case 5:
                userChoice = amounts[ input ]; // save user's choice
+               break;
+            case OTHER_AMOUNT: // user chose "Other Amount"
+               userChoice = promptForCustomAmount(currency);
                break;       
             case CANCELED: // the user chose to cancel
                userChoice = CANCELED; // save user's choice
                break;
-            default: // the user did not enter a value from 1-6
+            default: // the user did not enter a value from 1-7
                screen.displayMessageLine( 
                   "\nInvalid selection. Try again." );
          } // end switch
@@ -178,4 +183,37 @@ public class Withdrawal extends Transaction
 
       return userChoice; // return withdrawal amount or CANCELED
    } // end method displayMenuOfAmounts
+
+   // prompt user for custom withdrawal amount (must be multiple of 100)
+   private int promptForCustomAmount(String currency)
+   {
+      Screen screen = getScreen();
+      String symbol = currency.equals("HKD") ? "HK$" : "RMB ";
+
+      while (true)
+      {
+         screen.displayMessageLine( "\nEnter custom amount (must be multiple of 100):" );
+         screen.displayMessage( "Enter amount (" + symbol + "): " );
+         
+         int input = keypad.getInput();
+
+         // Check if amount is positive and multiple of 100
+         if (input > 0 && input % 100 == 0)
+         {
+            return input; // return valid custom amount
+         }
+         else if (input == 0)
+         {
+            // User entered 0, treat as cancel
+            screen.displayMessageLine( "\nCanceling custom amount entry..." );
+            return 0; // return 0 to go back to menu
+         }
+         else
+         {
+            // Invalid amount
+            screen.displayMessageLine( 
+               "\nInvalid amount. Please enter a positive multiple of 100." );
+         } // end else
+      } // end while
+   } // end method promptForCustomAmount
 } // end class Withdrawal
