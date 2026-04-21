@@ -1,548 +1,620 @@
 // =============================================================
 // ATMGUI.java
-// Complete Swing GUI for the ATM simulation system.
-//
-// Design principle: This file REPLACES only the console I/O
-// (Screen + Keypad) with GUI equivalents, then runs the
-// EXISTING ATM workflow on a background thread so the EDT
-// stays responsive. No logic in Account, BankDatabase,
-// CashDispenser, Transaction, BalanceInquiry, Withdrawal,
-// Transfer, or ATM is modified.
 // =============================================================
-
 import javax.swing.*;
 import javax.swing.border.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
 
 public class ATMGUI extends JFrame {
 
     // =========================================================
     // INNER CLASS: GUIScreen
-    // Replaces Screen.java — routes all display calls to the
-    // JTextArea on the EDT using SwingUtilities.invokeLater.
     // =========================================================
     public static class GUIScreen extends Screen {
+        private final JTextArea displayArea;
+        public GUIScreen(JTextArea area) { this.displayArea = area; }
 
-        private final JTextArea displayArea; // reference to the ATM display
-
-        public GUIScreen(JTextArea area) {
-            this.displayArea = area;
-        }
-
-        /** Append text WITHOUT a newline (mirrors Screen.displayMessage) */
         @Override
         public void displayMessage(String message) {
-            // Must update Swing components on the Event Dispatch Thread
             SwingUtilities.invokeLater(() -> displayArea.append(message));
         }
-
-        /** Append text WITH a newline (mirrors Screen.displayMessageLine) */
         @Override
         public void displayMessageLine(String message) {
             SwingUtilities.invokeLater(() -> displayArea.append(message + "\n"));
         }
-
-        /** Format and append HKD amount */
         @Override
         public void displayDollarAmount(double amount) {
             SwingUtilities.invokeLater(
-                () -> displayArea.append(String.format("HK$%,.2f", amount))
-            );
+                () -> displayArea.append(String.format("HK$%,.2f", amount)));
         }
-
-        /** Format and append RMB amount */
         @Override
         public void displayRMBAmount(double amount) {
             SwingUtilities.invokeLater(
-                () -> displayArea.append(String.format("RMB %,.2f", amount))
-            );
-        }
-
-        /** Clear the display area and show a fresh message */
-        public void clearAndShow(String message) {
-            SwingUtilities.invokeLater(() -> {
-                displayArea.setText(""); // wipe previous content
-                displayArea.append(message + "\n");
-            });
+                () -> displayArea.append(String.format("RMB %,.2f", amount)));
         }
     }
 
     // =========================================================
     // INNER CLASS: GUIKeypad
-    // Replaces Keypad.java — blocks the ATM background thread
-    // on a LinkedBlockingQueue until the user presses "Enter"
-    // in the GUI, then returns the buffered integer value.
     // =========================================================
     public static class GUIKeypad extends Keypad {
+        private final LinkedBlockingQueue<String> inputQueue =
+            new LinkedBlockingQueue<>();
 
-        // Thread-safe queue: GUI thread puts values, ATM thread takes them
-        private final LinkedBlockingQueue<Integer> inputQueue =
-                new LinkedBlockingQueue<>();
-
-        /**
-         * Called by ATM background thread.
-         * BLOCKS until the user submits input via the GUI keypad.
-         * Returns -1 on interrupt (safe fallback).
-         */
         @Override
         public int getInput() {
             try {
-                // take() blocks indefinitely until a value is available
-                return inputQueue.take();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt(); // restore interrupt flag
-                return -1; // safe sentinel value
-            }
-        }
-
-        /**
-         * Called by the GUI "Enter" button handler on the EDT.
-         * Parses the string and enqueues it for the ATM thread.
-         */
-        public void submitInput(String text) {
-            try {
-                int value = Integer.parseInt(text.trim());
-                inputQueue.put(value); // unblocks the waiting ATM thread
-            } catch (NumberFormatException e) {
-                // If the user typed non-numeric text, show a 0 (safe default)
-                try { inputQueue.put(0); } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                }
-            } catch (InterruptedException e) {
+                String s = inputQueue.take();
+                if ("CANCEL".equals(s)) return 0;
+                return (int) Double.parseDouble(s.trim());
+            } catch (Exception e) {
                 Thread.currentThread().interrupt();
+                return -1;
             }
         }
 
-        /**
-         * Enqueue a cancel signal (value = 0) so blocked ATM thread can exit.
-         * Used when the user presses the "Cancel" button.
-         */
+        public String getStringInput() {
+            try { return inputQueue.take(); }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return "0";
+            }
+        }
+
+        public void submitInput(String text) {
+            try { inputQueue.put(text.trim()); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
+
         public void submitCancel() {
-            try { inputQueue.put(0); }
+            try { inputQueue.put("CANCEL"); }
             catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         }
     }
 
     // =========================================================
-    // MAIN ATMGUI FIELDS
+    // FIELDS
     // =========================================================
-
-    // --- ATM business objects (keep existing classes intact) ---
-    private final BankDatabase bankDatabase;
+    private final BankDatabase  bankDatabase;
     private final CashDispenser cashDispenser;
-    private GUIScreen  guiScreen;   // our Swing-aware Screen
-    private GUIKeypad  guiKeypad;   // our queue-based Keypad
+    private GUIScreen guiScreen;
+    private GUIKeypad guiKeypad;
 
-    // --- ATM workflow state (for GUI-side awareness only) ---
-    private volatile int  currentState;       // current workflow step
-    private volatile int  currentAccountNumber = 0;
-    private volatile boolean userAuthenticated = false;
-    private volatile int  pinAttempts = 0;    // count failed PIN tries
+    private volatile int     currentState;
+    private volatile int     currentAccountNumber = 0;
+    private volatile boolean userAuthenticated    = false;
+    private volatile int     pinAttempts          = 0;
 
-    // Workflow state constants
     private static final int STATE_WELCOME       = 0;
     private static final int STATE_ENTER_ACCOUNT = 1;
     private static final int STATE_ENTER_PIN     = 2;
     private static final int STATE_MAIN_MENU     = 3;
-    private static final int STATE_IN_TRANSACTION= 4;
-    private static final int STATE_EJECT_CARD    = 5;
+    private static final int STATE_WITHDRAW      = 4;
+    private static final int STATE_TRANSFER      = 5;
+    private static final int STATE_BALANCE       = 6;
+    private static final int STATE_EJECT_CARD    = 7;
 
-    // --- GUI Components ---
-    private JTextArea      displayArea;    // ATM "screen"
-    private JPasswordField pinField;       // masked PIN entry
-    private JTextField     inputField;     // numeric input display
-    private JButton[]      numButtons;     // 0-9 digit buttons
-    private JButton        enterBtn;
-    private JButton        clearBtn;
-    private JButton        cancelBtn;
-    private JLabel         statusLabel;   // status bar at bottom
+    // --- LCD components ---
+    private JTextArea displayArea;
+    private JLabel    inputBarField;   // ← JLabel (never shows placeholder text)
+    private JPanel    amountGridPanel;
 
-    // Buffer for digits pressed before Enter is hit
+    // --- Side buttons ---
+    private JButton[] leftBtns  = new JButton[2];
+    private JButton[] rightBtns = new JButton[2];
+
+    // --- Keypad buttons ---
+    private JButton[] digitBtns   = new JButton[10];
+    private JButton   dotBtn, doubleZeroBtn;
+    private JButton   enterBtn, clearBtn, cancelBtn;
+    private JLabel    statusLabel;
+
+    // Preset amounts: index 0=200(TL), 1=800(TR), 2=400(BL), 3=1000(BR)
+    private static final int[] PRESET_AMOUNTS = {200, 800, 400, 1000};
+
     private final StringBuilder inputBuffer = new StringBuilder();
 
     // =========================================================
     // CONSTRUCTOR
     // =========================================================
     public ATMGUI() {
-        super("🏦  ATM Machine — HKD / RMB");
-
-        // Instantiate the existing business-logic objects
+        super("ATM Machine — HKD");
         bankDatabase  = new BankDatabase();
         cashDispenser = new CashDispenser();
-
-        buildUI();           // construct all Swing components
-        setAtmState(STATE_WELCOME); // show welcome screen
+        buildUI();
+        setAtmState(STATE_WELCOME);
     }
 
     // =========================================================
-    // UI CONSTRUCTION
+    // BUILD UI
     // =========================================================
-
-    /** Assemble and display the complete ATM window. */
     private void buildUI() {
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setSize(680, 620);
-        setLocationRelativeTo(null); // centre on screen
+        setSize(700, 820);
+        setLocationRelativeTo(null);
         setResizable(false);
         setLayout(new BorderLayout(0, 0));
+        getContentPane().setBackground(new Color(55, 55, 65));
 
-        // ----- HEADER -----
-        JPanel headerPanel = buildHeader();
-        add(headerPanel, BorderLayout.NORTH);
-
-        // ----- CENTRE: ATM display screen -----
-        JPanel screenPanel = buildScreen();
-        add(screenPanel, BorderLayout.CENTER);
-
-        // ----- SOUTH: keypad + input -----
-        JPanel keypadPanel = buildKeypad();
-        add(keypadPanel, BorderLayout.SOUTH);
+        add(buildHeader(),      BorderLayout.NORTH);
+        add(buildScreenArea(),  BorderLayout.CENTER);
+        add(buildKeypadPanel(), BorderLayout.SOUTH);
 
         setVisible(true);
     }
 
-    /** Branded header panel */
+    // ----------------------------------------------------------
+    // Header
+    // ----------------------------------------------------------
     private JPanel buildHeader() {
-        JPanel panel = new JPanel(new BorderLayout());
-        panel.setBackground(new Color(0, 51, 102)); // dark bank-blue
-        panel.setBorder(new EmptyBorder(10, 15, 10, 15));
+        JPanel p = new JPanel(new BorderLayout());
+        p.setBackground(new Color(0, 51, 102));
+        p.setBorder(new EmptyBorder(9, 16, 9, 16));
 
-        JLabel bankName = new JLabel("★  JAVA BANK ATM");
-        bankName.setFont(new Font("Arial", Font.BOLD, 22));
-        bankName.setForeground(Color.WHITE);
+        JLabel title = new JLabel("  JAVA BANK ATM");
+        title.setFont(new Font("Arial", Font.BOLD, 22));
+        title.setForeground(Color.WHITE);
 
-        JLabel subTitle = new JLabel("Secure · Fast · Reliable");
-        subTitle.setFont(new Font("Arial", Font.ITALIC, 12));
-        subTitle.setForeground(new Color(180, 210, 255));
+        JLabel sub = new JLabel("Secure · Fast · Reliable  ");
+        sub.setFont(new Font("Arial", Font.ITALIC, 12));
+        sub.setForeground(new Color(180, 210, 255));
 
-        panel.add(bankName, BorderLayout.WEST);
-        panel.add(subTitle, BorderLayout.EAST);
-        return panel;
+        p.add(title, BorderLayout.WEST);
+        p.add(sub,   BorderLayout.EAST);
+        return p;
     }
 
-    /** Green-on-black ATM display area */
-    private JPanel buildScreen() {
-        JPanel panel = new JPanel(new BorderLayout());
-        panel.setBorder(new CompoundBorder(
-                new EmptyBorder(10, 15, 5, 15),
-                new LineBorder(new Color(0, 150, 0), 2)));
+    // ----------------------------------------------------------
+    // Screen area
+    // ----------------------------------------------------------
+    private JPanel buildScreenArea() {
+        JPanel wrapper = new JPanel(new BorderLayout(0, 0));
+        wrapper.setBackground(new Color(55, 55, 65));
+        wrapper.setBorder(new EmptyBorder(14, 16, 6, 16));
 
-        // JTextArea simulates the ATM LCD screen
-        displayArea = new JTextArea(12, 50);
-        displayArea.setEditable(false);               // read-only display
-        displayArea.setFont(new Font("Monospaced", Font.PLAIN, 15));
-        displayArea.setBackground(new Color(10, 20, 10));  // near-black green
-        displayArea.setForeground(new Color(0, 230, 0));   // bright green text
-        displayArea.setCaretColor(new Color(0, 230, 0));
-        displayArea.setLineWrap(true);
-        displayArea.setWrapStyleWord(true);
-        displayArea.setMargin(new Insets(8, 10, 8, 10));
+        wrapper.add(buildPillColumn(true),  BorderLayout.WEST);
+        wrapper.add(buildLCD(),             BorderLayout.CENTER);
+        wrapper.add(buildPillColumn(false), BorderLayout.EAST);
 
-        JScrollPane scroll = new JScrollPane(displayArea);
-        scroll.setBorder(null);
-        panel.add(scroll, BorderLayout.CENTER);
-
-        return panel;
+        return wrapper;
     }
 
-    /** Keypad panel: digit buttons + Enter/Clear/Cancel + input fields */
-    private JPanel buildKeypad() {
-        JPanel outer = new JPanel(new BorderLayout(5, 5));
-        outer.setBorder(new EmptyBorder(5, 15, 10, 15));
-        outer.setBackground(new Color(230, 230, 230));
+    // ----------------------------------------------------------
+    // Pill side-button column  (buttons only, no text labels)
+    // ----------------------------------------------------------
+    private JPanel buildPillColumn(boolean isLeft) {
+        JPanel col = new JPanel();
+        col.setLayout(new BoxLayout(col, BoxLayout.Y_AXIS));
+        col.setOpaque(false);
+        col.setBorder(new EmptyBorder(8, 6, 8, 6));
 
-        // ---- Input fields row ----
-        JPanel fieldRow = new JPanel(new GridLayout(1, 2, 10, 0));
-        fieldRow.setOpaque(false);
+        for (int i = 0; i < 2; i++) {
+            JButton btn = makePillSideButton();
+            if (isLeft) leftBtns[i]  = btn;
+            else        rightBtns[i] = btn;
 
-        // Regular text field for account number / amounts
-        inputField = new JTextField();
-        inputField.setFont(new Font("Monospaced", Font.BOLD, 18));
-        inputField.setHorizontalAlignment(JTextField.CENTER);
-        inputField.setEditable(false);  // user presses buttons, not keyboard
-        inputField.setBorder(BorderFactory.createTitledBorder("Input"));
+            JPanel cell = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
+            cell.setOpaque(false);
+            cell.add(btn);
+            col.add(cell);
 
-        // Password field — echoChar masks each digit with a bullet
-        pinField = new JPasswordField();
-        pinField.setFont(new Font("Monospaced", Font.BOLD, 18));
-        pinField.setHorizontalAlignment(JTextField.CENTER);
-        pinField.setEchoChar('●');      // ← PIN MASKING requirement
-        pinField.setEditable(false);    // driven by numButtons
-        pinField.setBorder(BorderFactory.createTitledBorder("PIN (hidden)"));
-        pinField.setVisible(false);     // only shown during STATE_ENTER_PIN
-
-        fieldRow.add(inputField);
-        fieldRow.add(pinField);
-        outer.add(fieldRow, BorderLayout.NORTH);
-
-        // ---- Digit grid (1-9, then blank, 0, blank) ----
-        JPanel digitGrid = new JPanel(new GridLayout(4, 3, 6, 6));
-        digitGrid.setOpaque(false);
-        numButtons = new JButton[10];
-
-        for (int i = 1; i <= 9; i++) {
-            numButtons[i] = makeDigitButton(i);
-            digitGrid.add(numButtons[i]);
+            if (i == 0) col.add(Box.createVerticalStrut(18));
         }
-        digitGrid.add(new JLabel()); // empty cell (bottom-left)
-        numButtons[0] = makeDigitButton(0);
-        digitGrid.add(numButtons[0]);
-        digitGrid.add(new JLabel()); // empty cell (bottom-right)
+        col.add(Box.createVerticalGlue());
 
-        outer.add(digitGrid, BorderLayout.CENTER);
+        if (isLeft) {
+            leftBtns[0].addActionListener(e -> handleSideButton(0));
+            leftBtns[1].addActionListener(e -> handleSideButton(2));
+        } else {
+            rightBtns[0].addActionListener(e -> handleSideButton(1));
+            rightBtns[1].addActionListener(e -> handleSideButton(3));
+        }
 
-        // ---- Action buttons row ----
-        JPanel actionRow = new JPanel(new GridLayout(1, 3, 6, 0));
-        actionRow.setOpaque(false);
-
-        enterBtn  = makeActionButton("ENTER",  Color.WHITE, Color.BLACK);
-        clearBtn  = makeActionButton("CLEAR",  Color.WHITE, Color.BLACK);
-        cancelBtn = makeActionButton("CANCEL", Color.WHITE, Color.BLACK);
-
-        actionRow.add(enterBtn);
-        actionRow.add(clearBtn);
-        actionRow.add(cancelBtn);
-
-        // ---- Status bar ----
-        statusLabel = new JLabel(" Ready", SwingConstants.LEFT);
-        statusLabel.setFont(new Font("Arial", Font.ITALIC, 11));
-        statusLabel.setForeground(Color.DARK_GRAY);
-        statusLabel.setBorder(new EmptyBorder(2, 0, 0, 0));
-
-        JPanel bottomStrip = new JPanel(new BorderLayout());
-        bottomStrip.setOpaque(false);
-        bottomStrip.add(actionRow, BorderLayout.CENTER);
-        bottomStrip.add(statusLabel, BorderLayout.SOUTH);
-
-        outer.add(bottomStrip, BorderLayout.SOUTH);
-
-        // Wire up button listeners
-        wireListeners();
-
-        return outer;
+        return col;
     }
 
-    /** Create a styled digit button */
-    private JButton makeDigitButton(int digit) {
-        JButton btn = new JButton(String.valueOf(digit));
-        btn.setFont(new Font("Arial", Font.BOLD, 20));
-        btn.setBackground(new Color(245, 245, 245));
+    private JButton makePillSideButton() {
+        JButton btn = new JButton() {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                                    RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setColor(getModel().isPressed()
+                            ? new Color(90, 90, 100)
+                            : new Color(130, 130, 140));
+                g2.fillRoundRect(0, 0, getWidth(), getHeight(), 30, 30);
+                g2.setColor(new Color(70, 70, 80));
+                g2.drawRoundRect(0, 0, getWidth()-1, getHeight()-1, 30, 30);
+                g2.dispose();
+            }
+            @Override protected void paintBorder(Graphics g) {}
+        };
+        btn.setPreferredSize(new Dimension(32, 72));
+        btn.setMinimumSize  (new Dimension(32, 72));
+        btn.setMaximumSize  (new Dimension(32, 72));
+        btn.setContentAreaFilled(false);
+        btn.setBorderPainted(false);
         btn.setFocusPainted(false);
-        btn.setPreferredSize(new Dimension(70, 50));
+        btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         return btn;
     }
 
-    /** Create a styled action button with given background and text colours */
-    private JButton makeActionButton(String label, Color bg, Color fg) {
-        JButton btn = new JButton(label);
-        btn.setFont(new Font("Arial", Font.BOLD, 14));
+    // ----------------------------------------------------------
+    // LCD
+    // ----------------------------------------------------------
+    private JPanel buildLCD() {
+        JPanel lcd = new JPanel(new BorderLayout(0, 0));
+        lcd.setBackground(new Color(10, 22, 10));
+        lcd.setBorder(new LineBorder(new Color(0, 110, 0), 2));
+
+        // Scrollable text display
+        displayArea = new JTextArea(11, 36);
+        displayArea.setEditable(false);
+        displayArea.setFont(new Font("Monospaced", Font.PLAIN, 14));
+        displayArea.setBackground(new Color(10, 22, 10));
+        displayArea.setForeground(new Color(0, 215, 0));
+        displayArea.setCaretColor(new Color(0, 215, 0));
+        displayArea.setLineWrap(true);
+        displayArea.setWrapStyleWord(true);
+        displayArea.setMargin(new Insets(6, 10, 4, 10));
+
+        JScrollPane scroll = new JScrollPane(displayArea);
+        scroll.setBorder(null);
+        scroll.setBackground(new Color(10, 22, 10));
+
+        // Amount grid (hidden until withdraw state)
+        amountGridPanel = buildAmountDisplayGrid();
+        amountGridPanel.setVisible(false);
+
+        // Input bar — always visible
+        JPanel inputBar = buildInputBar();
+
+        JPanel south = new JPanel(new BorderLayout(0, 0));
+        south.setBackground(new Color(10, 22, 10));
+        south.add(amountGridPanel, BorderLayout.CENTER);
+        south.add(inputBar,        BorderLayout.SOUTH);
+
+        lcd.add(scroll, BorderLayout.CENTER);
+        lcd.add(south,  BorderLayout.SOUTH);
+
+        return lcd;
+    }
+
+    // ----------------------------------------------------------
+    // Amount display grid (non-clickable JLabels)
+    // ----------------------------------------------------------
+    private JPanel buildAmountDisplayGrid() {
+        JPanel container = new JPanel(new BorderLayout(0, 2));
+        container.setBackground(new Color(10, 22, 10));
+        container.setBorder(new EmptyBorder(4, 8, 4, 8));
+
+        JLabel title = new JLabel("Please select the amount", SwingConstants.CENTER);
+        title.setFont(new Font("Arial", Font.PLAIN, 12));
+        title.setForeground(new Color(0, 200, 0));
+
+        // 2×2 non-clickable display labels
+        JPanel grid = new JPanel(new GridLayout(2, 2, 3, 3));
+        grid.setBackground(new Color(10, 22, 10));
+        String[] labels = {"HKD 200", "HKD 800", "HKD 400", "HKD 1000"};
+        for (String lbl : labels) grid.add(makeAmountDisplayLabel(lbl));
+
+        JLabel hint = new JLabel(
+            "<html><center><font color='#AAAAAA'>or<br>"
+            + "enter the amount and press "
+            + "<font color='#00FF00'><b>enter</b></font>"
+            + " button</font></center></html>",
+            SwingConstants.CENTER);
+        hint.setFont(new Font("Arial", Font.PLAIN, 11));
+
+        container.add(title, BorderLayout.NORTH);
+        container.add(grid,  BorderLayout.CENTER);
+        container.add(hint,  BorderLayout.SOUTH);
+        return container;
+    }
+
+    private JLabel makeAmountDisplayLabel(String text) {
+        JLabel lbl = new JLabel(text, SwingConstants.CENTER);
+        lbl.setFont(new Font("Arial", Font.BOLD, 13));
+        lbl.setForeground(new Color(0, 220, 0));
+        lbl.setBackground(new Color(20, 40, 20));
+        lbl.setOpaque(true);
+        lbl.setBorder(new LineBorder(new Color(0, 130, 0), 1));
+        lbl.setPreferredSize(new Dimension(0, 30));
+        return lbl;
+    }
+
+    // ----------------------------------------------------------
+    // Input bar  ← KEY FIX: uses JLabel, never shows "In..."
+    // ----------------------------------------------------------
+    private JPanel buildInputBar() {
+        JPanel bar = new JPanel(new BorderLayout(0, 0));
+        bar.setBackground(new Color(5, 14, 5));
+        bar.setBorder(new MatteBorder(1, 0, 0, 0, new Color(0, 90, 0)));
+
+        // Static "Input:" label on the left
+        JLabel lbl = new JLabel("Input:");
+        lbl.setFont(new Font("Monospaced", Font.BOLD, 13));
+        lbl.setForeground(new Color(0, 200, 0));
+        lbl.setOpaque(true);
+        lbl.setBackground(new Color(5, 14, 5));
+        lbl.setBorder(new EmptyBorder(4, 8, 4, 6));
+        lbl.setPreferredSize(new Dimension(62, 30));
+
+        // Dynamic value label — starts completely empty, no placeholder possible
+        inputBarField = new JLabel("");
+        inputBarField.setFont(new Font("Monospaced", Font.BOLD, 15));
+        inputBarField.setForeground(new Color(0, 255, 0));
+        inputBarField.setOpaque(true);
+        inputBarField.setBackground(new Color(5, 14, 5));
+        inputBarField.setBorder(new EmptyBorder(4, 2, 4, 8));
+
+        bar.add(lbl,           BorderLayout.WEST);
+        bar.add(inputBarField, BorderLayout.CENTER);
+        return bar;
+    }
+
+    // ----------------------------------------------------------
+    // Keypad panel
+    // ----------------------------------------------------------
+    private JPanel buildKeypadPanel() {
+        JPanel outer = new JPanel(new BorderLayout(0, 6));
+        outer.setBackground(new Color(55, 55, 65));
+        outer.setBorder(new CompoundBorder(
+            new EmptyBorder(4, 14, 14, 14),
+            new CompoundBorder(
+                new LineBorder(new Color(75, 75, 85), 2),
+                new EmptyBorder(8, 10, 8, 10))));
+
+        statusLabel = new JLabel("  Ready", SwingConstants.LEFT);
+        statusLabel.setFont(new Font("Arial", Font.ITALIC, 11));
+        statusLabel.setForeground(new Color(180, 180, 190));
+        outer.add(statusLabel, BorderLayout.NORTH);
+
+        JPanel grid = new JPanel(new GridLayout(4, 4, 8, 8));
+        grid.setOpaque(false);
+
+        for (int i = 0; i <= 9; i++)
+            digitBtns[i] = makeKeyBtn(String.valueOf(i),
+                                       new Color(228, 228, 228), Color.BLACK);
+
+        dotBtn        = makeKeyBtn(".",      new Color(228, 228, 228), Color.BLACK);
+        doubleZeroBtn = makeKeyBtn("00",     new Color(228, 228, 228), Color.BLACK);
+        cancelBtn     = makeKeyBtn("cancel", new Color(248, 105, 107), Color.BLACK);
+        clearBtn      = makeKeyBtn("clear",  new Color(255, 235, 100), Color.BLACK);
+        enterBtn      = makeKeyBtn("Enter",  new Color(100, 200, 100), Color.BLACK);
+
+        // Row 1
+        grid.add(digitBtns[7]); grid.add(digitBtns[8]);
+        grid.add(digitBtns[9]); grid.add(cancelBtn);
+        // Row 2
+        grid.add(digitBtns[4]); grid.add(digitBtns[5]);
+        grid.add(digitBtns[6]); grid.add(clearBtn);
+        // Row 3
+        grid.add(digitBtns[1]); grid.add(digitBtns[2]);
+        grid.add(digitBtns[3]); grid.add(enterBtn);
+        // Row 4
+        grid.add(digitBtns[0]); grid.add(dotBtn);
+        grid.add(doubleZeroBtn); grid.add(new JLabel());
+
+        outer.add(grid, BorderLayout.CENTER);
+        wireKeypadListeners();
+        return outer;
+    }
+
+    private JButton makeKeyBtn(String label, Color bg, Color fg) {
+        JButton btn = new JButton(label) {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                                    RenderingHints.VALUE_ANTIALIAS_ON);
+                Color base = getBackground();
+                g2.setColor(getModel().isPressed() ? base.darker() : base);
+                int arc = getHeight();
+                g2.fillRoundRect(1, 1, getWidth()-2, getHeight()-2, arc, arc);
+                g2.setColor(base.darker());
+                g2.drawRoundRect(1, 1, getWidth()-3, getHeight()-3, arc, arc);
+                g2.setFont(getFont());
+                g2.setColor(getForeground());
+                FontMetrics fm = g2.getFontMetrics();
+                int tx = (getWidth()  - fm.stringWidth(label)) / 2;
+                int ty = (getHeight() + fm.getAscent() - fm.getDescent()) / 2;
+                g2.drawString(label, tx, ty);
+                g2.dispose();
+            }
+            @Override protected void paintBorder(Graphics g) {}
+        };
         btn.setBackground(bg);
         btn.setForeground(fg);
+        btn.setFont(new Font("Arial", Font.BOLD, 15));
+        btn.setContentAreaFilled(false);
+        btn.setBorderPainted(false);
         btn.setFocusPainted(false);
-        btn.setPreferredSize(new Dimension(100, 45));
+        btn.setOpaque(false);
+        btn.setPreferredSize(new Dimension(70, 48));
+        btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         return btn;
     }
 
     // =========================================================
     // EVENT WIRING
     // =========================================================
-
-    /** Attach ActionListeners to all buttons. */
-    private void wireListeners() {
-
-        // Digit buttons — append digit to buffer and update display fields
+    private void wireKeypadListeners() {
         for (int i = 0; i <= 9; i++) {
-            final int digit = i;
-            numButtons[i].addActionListener(e -> handleDigitPress(digit));
+            final String d = String.valueOf(i);
+            digitBtns[i].addActionListener(e -> appendInput(d));
         }
-
-        // ENTER — submit whatever is buffered
-        enterBtn.addActionListener(e -> handleEnter());
-
-        // CLEAR — erase last digit or whole buffer
-        clearBtn.addActionListener(e -> handleClear());
-
-        // CANCEL — send cancel signal and reset to welcome
+        dotBtn.addActionListener(e -> {
+            if (!inputBuffer.toString().contains(".")) appendInput(".");
+        });
+        doubleZeroBtn.addActionListener(e -> {
+            appendInput("0"); appendInput("0");
+        });
+        enterBtn .addActionListener(e -> handleEnter());
+        clearBtn .addActionListener(e -> handleClear());
         cancelBtn.addActionListener(e -> handleCancel());
     }
 
-    // =========================================================
-    // BUTTON HANDLERS  (all run on the EDT)
-    // =========================================================
-
-    /**
-     * Appends a digit to the shared buffer and refreshes both
-     * the regular input field and the masked PIN field.
-     */
-    private void handleDigitPress(int digit) {
-        inputBuffer.append(digit);
-
-        // Update the visible (non-PIN) field
-        inputField.setText(inputBuffer.toString());
-
-        // Update the PIN field (JPasswordField masks automatically)
-        // We store the raw digits in pinField's text so getPassword() works
-        pinField.setText(inputBuffer.toString());
-
-        setStatus("Digit entered: " + inputBuffer.length() + " char(s)");
+    // ── Input helpers ─────────────────────────────────────────
+    private void appendInput(String ch) {
+        inputBuffer.append(ch);
+        // JLabel.setText() — no placeholder, no "In..." ever
+        inputBarField.setText(inputBuffer.toString());
     }
 
-    /**
-     * "Enter" pressed: read buffer, clear it, then hand the
-     * value to GUIKeypad so the ATM background thread unblocks.
-     */
     private void handleEnter() {
-    String text = inputBuffer.toString().trim();
-    inputBuffer.setLength(0);
-    inputField.setText("");
-    pinField.setText("");
-
-    if (text.isEmpty()) {
-        // Instead of blocking, send a safe sentinel (e.g., 0)
-        if (guiKeypad != null) {
-            guiKeypad.submitInput("0"); // unblock ATM thread
-        }
-        setStatus("Acknowledged.");
-        return;
+        String text = inputBuffer.toString().trim();
+        clearInputBuffer();
+        if (text.isEmpty()) text = "0";
+        setStatus("Entered: " + (currentState == STATE_ENTER_PIN ? "****" : text));
+        if (guiKeypad != null) guiKeypad.submitInput(text);
     }
 
-    setStatus("Submitted: " + (currentState == STATE_ENTER_PIN ? "****" : text));
-    if (guiKeypad != null) {
-        guiKeypad.submitInput(text);
-    }
-    }
-    
-
-    /** Removes the last digit from the buffer (backspace behaviour). */
     private void handleClear() {
         if (inputBuffer.length() > 0) {
             inputBuffer.deleteCharAt(inputBuffer.length() - 1);
-            inputField.setText(inputBuffer.toString());
-            pinField.setText(inputBuffer.toString());
+            inputBarField.setText(inputBuffer.toString());
         }
-        setStatus("Cleared.");
+        setStatus("Cleared last digit.");
     }
 
-    /**
-     * Cancel: push a cancel sentinel to the queue so the
-     * waiting ATM thread can break out, then reset the GUI.
-     */
     private void handleCancel() {
-        inputBuffer.setLength(0);
-        inputField.setText("");
-        pinField.setText("");
-        setStatus("Transaction cancelled by user.");
-
-        if (guiKeypad != null) {
-            guiKeypad.submitCancel();   // ATM thread gets 0 = CANCEL
-        }
-        // GUI resets to welcome after a short delay
-        Timer t = new Timer(1500, e -> setAtmState(STATE_WELCOME));
+        clearInputBuffer();
+        setStatus("Cancelled.");
+        if (guiKeypad != null) guiKeypad.submitCancel();
+        Timer t = new Timer(600, e -> setAtmState(STATE_WELCOME));
         t.setRepeats(false);
         t.start();
     }
 
-    // =========================================================
-    // STATE MACHINE  (controls GUI appearance per workflow step)
-    // =========================================================
+    private void clearInputBuffer() {
+        inputBuffer.setLength(0);
+        inputBarField.setText("");   // guaranteed blank
+    }
 
-    /**
-     * Switch the GUI into a new state.
-     * Always called on the EDT.
-     */
+    // =========================================================
+    // SIDE-BUTTON HANDLER
+    // =========================================================
+    private void handleSideButton(int idx) {
+        switch (currentState) {
+            case STATE_MAIN_MENU:
+                if (guiKeypad != null)
+                    guiKeypad.submitInput(String.valueOf(idx + 1));
+                break;
+            case STATE_WITHDRAW:
+                if (guiKeypad != null)
+                    guiKeypad.submitInput(String.valueOf(PRESET_AMOUNTS[idx]));
+                break;
+            default:
+                break;
+        }
+    }
+
+    // =========================================================
+    // STATE MACHINE
+    // =========================================================
     private void setAtmState(int state) {
         currentState = state;
 
-        // Show/hide the PIN field based on whether we need masking
-        boolean isPinState = (state == STATE_ENTER_PIN);
-        pinField.setVisible(isPinState);
-        inputField.setVisible(!isPinState);
+        SwingUtilities.invokeLater(() ->
+            amountGridPanel.setVisible(state == STATE_WITHDRAW));
 
-        // Enable/disable keypad based on whether input is expected
-        boolean inputExpected = (state != STATE_EJECT_CARD);
-        setKeypadEnabled(inputExpected);
+        boolean kbEnabled   = (state != STATE_EJECT_CARD && state != STATE_MAIN_MENU);
+        boolean sideEnabled = (state == STATE_MAIN_MENU  || state == STATE_WITHDRAW);
+        setKeypadEnabled(kbEnabled);
+        setSideButtonsEnabled(sideEnabled);
 
         switch (state) {
-
             case STATE_WELCOME:
                 clearDisplay();
                 appendDisplay("╔══════════════════════════════════╗");
-                appendDisplay("║    Welcome to JAVA BANK ATM!     ║");
+                appendDisplay("║     Welcome to JAVA BANK ATM     ║");
                 appendDisplay("║                                  ║");
-                appendDisplay("║  Please insert your card and     ║");
-                appendDisplay("║  enter your Account Number.      ║");
+                appendDisplay("║   Please insert your card.       ║");
                 appendDisplay("╚══════════════════════════════════╝");
-                appendDisplay("");
-                // Transition: automatically move to account-entry
+                setStatus("Welcome");
                 setAtmState(STATE_ENTER_ACCOUNT);
                 break;
 
             case STATE_ENTER_ACCOUNT:
                 currentState = STATE_ENTER_ACCOUNT;
                 clearDisplay();
-                appendDisplay("━━━━━━  ACCOUNT NUMBER  ━━━━━━");
+                appendDisplay("━━━━  ACCOUNT NUMBER  ━━━━");
                 appendDisplay("");
-                appendDisplay("  Please enter your account number");
-                appendDisplay("  and press ENTER.");
+                appendDisplay("  Enter your account number");
+                appendDisplay("  and press  Enter .");
                 appendDisplay("");
-                appendDisplay("  (Test accounts: 12345 or 98765)");
-                setStatus("Enter account number");
-                startATMThread(); // kick off the background ATM thread
+                appendDisplay("  (Test: 12345  PIN: 54321)");
+                appendDisplay("  (Test: 98765  PIN: 56789)");
+                setStatus("Enter account number, press Enter");
+                startATMThread();
                 break;
 
             case STATE_ENTER_PIN:
                 clearDisplay();
-                appendDisplay("━━━━━━  PIN ENTRY  ━━━━━━");
+                appendDisplay("━━━━  PIN ENTRY  ━━━━");
                 appendDisplay("");
-                appendDisplay("  Enter your PIN and press ENTER.");
-                appendDisplay("  Your PIN is hidden for security.");
-                appendDisplay("");
-                if (pinAttempts > 0) {
-                    appendDisplay("  ⚠  Incorrect PIN. Attempt "
-                            + pinAttempts + " of 3.");
-                }
-                setStatus("Enter PIN (masked)");
+                appendDisplay("  Enter your PIN and press  Enter .");
+                appendDisplay("  Input is hidden for security.");
+                if (pinAttempts > 0)
+                    appendDisplay("\n  ⚠ Wrong PIN — attempt "
+                                  + pinAttempts + " of 3");
+                setStatus("Enter PIN, press Enter");
                 break;
 
             case STATE_MAIN_MENU:
                 clearDisplay();
-                appendDisplay("━━━━━━  MAIN MENU  ━━━━━━");
+                appendDisplay("━━━━  MAIN MENU  ━━━━");
                 appendDisplay("");
-                appendDisplay("  1 — View Balance");
-                appendDisplay("  2 — Withdraw Cash");
-                appendDisplay("  3 — Transfer Funds");
-                appendDisplay("  4 — Exit / Log Out");
+                appendDisplay("  1. View Balance    │  2. Withdraw Cash");
+                appendDisplay("  ─────────────────────────────────────");
+                appendDisplay("  3. Transfer Funds  │  4. Exit / Log Out");
                 appendDisplay("");
-                appendDisplay("  Enter option and press ENTER.");
-                setStatus("Authenticated — Account: " + currentAccountNumber);
+                appendDisplay("  Use the side buttons to select.");
+                setStatus("Select an option with the side buttons");
                 break;
 
-            case STATE_IN_TRANSACTION:
-                setStatus("Transaction in progress…");
+            case STATE_WITHDRAW:
+                clearDisplay();
+                appendDisplay("━━━━  WITHDRAWAL  ━━━━");
+                appendDisplay("");
+                appendDisplay("  Select a preset amount (side buttons)");
+                appendDisplay("  or type an amount and press  Enter .");
+                setStatus("Select or type amount, press Enter");
+                break;
+
+            case STATE_TRANSFER:
+                clearDisplay();
+                appendDisplay("━━━━  TRANSFER FUNDS  ━━━━");
+                appendDisplay("");
+                appendDisplay("  Step 1 of 2:");
+                appendDisplay("  Type the TARGET account number,");
+                appendDisplay("  then press  Enter .");
+                setStatus("Type target account number, press Enter");
+                break;
+
+            case STATE_BALANCE:
+                setStatus("Viewing balance…");
                 break;
 
             case STATE_EJECT_CARD:
                 clearDisplay();
-                appendDisplay("━━━━━━  SESSION ENDED  ━━━━━━");
+                appendDisplay("━━━━  SESSION ENDED  ━━━━");
                 appendDisplay("");
                 appendDisplay("  ▶  Please take your card.");
-                appendDisplay("");
-                userAuthenticated   = false;
+                userAuthenticated    = false;
                 currentAccountNumber = 0;
-                pinAttempts         = 0;
-                setKeypadEnabled(false);
-                setStatus("Card ejected. Session ended.");
-
-                // Auto-return to Welcome after 3 seconds
-                Timer ejectionTimer = new Timer(3000, e -> {
+                pinAttempts          = 0;
+                setStatus("Card ejected. Goodbye!");
+                Timer t = new Timer(3000, e -> {
                     setKeypadEnabled(true);
                     setAtmState(STATE_WELCOME);
                 });
-                ejectionTimer.setRepeats(false);
-                ejectionTimer.start();
+                t.setRepeats(false);
+                t.start();
                 break;
         }
     }
@@ -550,473 +622,373 @@ public class ATMGUI extends JFrame {
     // =========================================================
     // ATM BACKGROUND THREAD
     // =========================================================
-
-    /**
-     * Runs the existing ATM workflow on a daemon thread so the
-     * Event Dispatch Thread is never blocked.
-     *
-     * We create fresh GUIScreen / GUIKeypad instances each
-     * session so the blocking queue starts empty.
-     */
     private void startATMThread() {
         guiScreen = new GUIScreen(displayArea);
         guiKeypad = new GUIKeypad();
-
-        Thread atmThread = new Thread(() -> runATMSession(), "ATM-Worker");
-        atmThread.setDaemon(true); // thread dies when app closes
-        atmThread.start();
+        Thread t  = new Thread(this::runATMSession, "ATM-Worker");
+        t.setDaemon(true);
+        t.start();
     }
 
-    /**
-     * Full ATM session logic — mirrors ATM.run() but uses
-     * GUIScreen / GUIKeypad instead of console I/O.
-     * Runs entirely on the ATM-Worker thread.
-     */
     private void runATMSession() {
-        // ---- STEP 1: Account number entry ----
-        guiScreen.displayMessageLine("\n  Enter your account number:");
 
+        // STEP 1: Account number
         int accountNumber = guiKeypad.getInput();
         currentAccountNumber = accountNumber;
 
-        // ---- STEP 2: PIN entry (up to 3 attempts) ----
+        // STEP 2: PIN — up to 3 attempts
         SwingUtilities.invokeLater(() -> setAtmState(STATE_ENTER_PIN));
-        // Small sleep so the EDT can repaint before we block again
-        sleep(200);
+        sleep(150);
 
         boolean authenticated = false;
         for (pinAttempts = 0; pinAttempts < 3; pinAttempts++) {
-
-            // Refresh PIN screen with attempt counter
-            final int attempt = pinAttempts;
-            if (attempt > 0) {
+            final int att = pinAttempts;
+            if (att > 0) {
                 SwingUtilities.invokeLater(() -> {
                     clearDisplay();
-                    appendDisplay("━━━━━━  PIN ENTRY  ━━━━━━");
-                    appendDisplay("");
-                    appendDisplay("  ⚠  Incorrect PIN.");
-                    appendDisplay("  Attempt " + (attempt + 1) + " of 3.");
-                    appendDisplay("");
-                    appendDisplay("  Please re-enter your PIN:");
+                    appendDisplay("━━━━  PIN ENTRY  ━━━━");
+                    appendDisplay("\n  ⚠ Wrong PIN — attempt " + (att + 1) + " of 3");
+                    appendDisplay("\n  Re-enter PIN and press  Enter .");
                 });
             }
-
             int pin = guiKeypad.getInput();
-
             if (bankDatabase.authenticateUser(accountNumber, pin)) {
-                authenticated = true;
+                authenticated     = true;
                 userAuthenticated = true;
                 break;
             }
         }
 
-        // ---- Too many failed PIN attempts ----
         if (!authenticated) {
             SwingUtilities.invokeLater(() -> {
                 clearDisplay();
-                appendDisplay("━━━━━━  ACCESS DENIED  ━━━━━━");
-                appendDisplay("");
-                appendDisplay("  ✖  Too many incorrect PIN attempts.");
+                appendDisplay("━━━━  ACCESS DENIED  ━━━━");
+                appendDisplay("\n  ✖  Too many wrong PIN attempts.");
                 appendDisplay("  Your card has been retained.");
-                appendDisplay("  Please contact your bank.");
-                setStatus("Authentication failed — card retained.");
+                setStatus("Card retained. Please contact bank.");
             });
             sleep(3500);
             SwingUtilities.invokeLater(() -> setAtmState(STATE_WELCOME));
             return;
         }
 
-        // ---- STEP 3: Show main menu ----
+        // STEP 3: Main menu loop
         SwingUtilities.invokeLater(() -> setAtmState(STATE_MAIN_MENU));
-        sleep(200);
+        sleep(150);
 
-        // ---- STEP 4: Transaction loop ----
-        boolean userExited = false;
-        while (!userExited) {
-
-            guiScreen.displayMessageLine("\n  Enter option (1-4):");
+        boolean running = true;
+        while (running) {
             int choice = guiKeypad.getInput();
-
             switch (choice) {
-                case 1: // Balance inquiry
-                    SwingUtilities.invokeLater(() -> {
-                        currentState = STATE_IN_TRANSACTION;
-                        clearDisplay();
-                        appendDisplay("━━━━━━  BALANCE INQUIRY  ━━━━━━");
-                    });
-                    sleep(100);
-                    performBalanceInquiry();
-                    sleep(200);
-                    SwingUtilities.invokeLater(() -> setAtmState(STATE_MAIN_MENU));
-                    sleep(200);
-                    break;
-
-                case 2: // Withdrawal
-                    SwingUtilities.invokeLater(() -> {
-                        currentState = STATE_IN_TRANSACTION;
-                        clearDisplay();
-                        appendDisplay("━━━━━━  WITHDRAWAL  ━━━━━━");
-                    });
-                    sleep(100);
-                    boolean dispensed = performWithdrawal();
-                    sleep(200);
-                    if (dispensed) {
-                        // Show card-eject screen after successful withdrawal
-                        SwingUtilities.invokeLater(() -> {
-                            appendDisplay("");
-                            appendDisplay("  ▶  Please take your cash.");
-                        });
-                        sleep(2500);
-                        SwingUtilities.invokeLater(() -> setAtmState(STATE_EJECT_CARD));
-                        sleep(3500);
-                        // Re-authenticate for next use (return to welcome)
-                        SwingUtilities.invokeLater(() -> setAtmState(STATE_WELCOME));
-                        return; // end this session
-                    } else {
-                        SwingUtilities.invokeLater(() -> setAtmState(STATE_MAIN_MENU));
-                        sleep(200);
-                    }
-                    break;
-
-                case 3: // Transfer
-                    SwingUtilities.invokeLater(() -> {
-                        currentState = STATE_IN_TRANSACTION;
-                        clearDisplay();
-                        appendDisplay("━━━━━━  TRANSFER  ━━━━━━");
-                    });
-                    sleep(100);
-                    performTransfer();
-                    sleep(200);
-                    SwingUtilities.invokeLater(() -> setAtmState(STATE_MAIN_MENU));
-                    sleep(200);
-                    break;
-
-                case 4: // Exit
-                    userExited = true;
-                    break;
-
+                case 1: doBalance();             break;
+                case 2: running = !doWithdraw(); break;
+                case 3: doTransfer();            break;
+                case 4: running = false;         break;
                 default:
-                    guiScreen.displayMessageLine(
-                        "  ⚠  Invalid choice. Please select 1-4.");
+                    guiScreen.displayMessageLine("\n  ⚠ Use side buttons 1–4.");
                     break;
+            }
+            if (running) {
+                SwingUtilities.invokeLater(() -> setAtmState(STATE_MAIN_MENU));
+                sleep(150);
             }
         }
 
-        // ---- STEP 5: Log out — eject card ----
         SwingUtilities.invokeLater(() -> setAtmState(STATE_EJECT_CARD));
     }
 
     // =========================================================
-    // TRANSACTION METHODS  (ATM-Worker thread)
-    // Uses existing BankDatabase / CashDispenser logic.
-    // Dialogs are shown via SwingUtilities.invokeAndWait so
-    // they appear on the EDT while the worker thread waits.
+    // TRANSACTIONS
     // =========================================================
 
-    /** Display available and total balance for the current account. */
-    private void performBalanceInquiry() {
-        double available = bankDatabase.getAvailableBalance(currentAccountNumber);
-        double total     = bankDatabase.getTotalBalance(currentAccountNumber);
+    // ── Balance ──────────────────────────────────────────────
+    private void doBalance() {
+        SwingUtilities.invokeLater(() -> {
+            currentState = STATE_BALANCE;
+            clearDisplay();
+            appendDisplay("━━━━  BALANCE INQUIRY  ━━━━");
+            setKeypadEnabled(true);
+        });
+        sleep(100);
 
-        guiScreen.displayMessageLine("");
-        guiScreen.displayMessageLine(
-            "  Account:           " + currentAccountNumber);
+        double avail = bankDatabase.getAvailableBalance(currentAccountNumber);
+        double total = bankDatabase.getTotalBalance(currentAccountNumber);
+
+        guiScreen.displayMessageLine("\n  Account : " + currentAccountNumber);
         guiScreen.displayMessageLine("  ─────────────────────────────");
-        guiScreen.displayMessage("  Available Balance: ");
-        guiScreen.displayDollarAmount(available);
+        guiScreen.displayMessage    ("  Available : ");
+        guiScreen.displayDollarAmount(avail);
         guiScreen.displayMessageLine("");
-        guiScreen.displayMessage("  Total Balance:     ");
+        guiScreen.displayMessage    ("  Total     : ");
         guiScreen.displayDollarAmount(total);
-        guiScreen.displayMessageLine("");
-        guiScreen.displayMessageLine("  ─────────────────────────────");
-        guiScreen.displayMessageLine("  Press ENTER to return to menu.");
+        guiScreen.displayMessageLine("\n\n  Press  Enter  to return to menu.");
 
-        guiKeypad.getInput(); // wait for user to acknowledge
+        guiKeypad.getStringInput();
     }
 
-    /**
-     * Guides user through currency selection → amount selection
-     * → balance/dispenser check → confirmation → debit.
-     * Returns true if cash was successfully dispensed.
-     */
-    private boolean performWithdrawal() {
-    
-        // --- Currency selection via JOptionPane (EDT-safe) ---
-        String[] currencies = {"HKD", "RMB"};
-        final int[] curResult = {-1};
-        try {
-            SwingUtilities.invokeAndWait(() ->
-                curResult[0] = JOptionPane.showOptionDialog(
-                    this,
-                    "Select withdrawal currency:",
-                    "Withdrawal - Currency",
-                    JOptionPane.DEFAULT_OPTION,
-                    JOptionPane.QUESTION_MESSAGE,
-                    null, currencies, currencies[0])
-            );
-        } catch (Exception e) { return false; }
-    
-        if (curResult[0] == JOptionPane.CLOSED_OPTION) return false;
-        String currency = currencies[curResult[0]];
-    
-        // --- Amount menu (updated) ---
-        int[] amountsHKD = {100, 200, 400, 800, 1000};
-        int[] amountsRMB = {100, 200, 400, 800, 1000};
-        int[] amounts = currency.equals("HKD") ? amountsHKD : amountsRMB;
-        String sym = currency.equals("HKD") ? "HK$" : "RMB ";
-    
-        // Build labels including "Other Amount"
-        String[] amtLabels = new String[amounts.length + 1];
-        for (int i = 0; i < amounts.length; i++) {
-            amtLabels[i] = sym + amounts[i];
-        }
-        amtLabels[amounts.length] = "Other Amount";
-    
-        final String[] selectedStr = {null};
-        try {
-            SwingUtilities.invokeAndWait(() ->
-                selectedStr[0] = (String) JOptionPane.showInputDialog(
-                    this,
-                    "Select withdrawal amount (" + currency + "):",
-                    "Withdrawal - Amount",
-                    JOptionPane.QUESTION_MESSAGE,
-                    null, amtLabels, amtLabels[0])
-            );
-        } catch (Exception e) { return false; }
-        if (selectedStr[0] == null) return false; // user cancelled
-    
-        // --- Handle fixed vs Other Amount ---
-        int amount;
-        if ("Other Amount".equals(selectedStr[0])) {
-            String customStr = JOptionPane.showInputDialog(
-                this,
-                "Enter custom withdrawal amount (" + currency + "):",
-                "Withdrawal - Custom Amount",
-                JOptionPane.QUESTION_MESSAGE
-            );
-            if (customStr == null || customStr.trim().isEmpty()) return false;
-            try {
-                amount = Integer.parseInt(customStr.trim());
-            } catch (NumberFormatException e) {
-                guiScreen.displayMessageLine("✖ Invalid amount entered.");
-                return false;
-            }
-        } else {
-            try {
-                amount = Integer.parseInt(selectedStr[0].replaceAll("[^0-9]", ""));
-            } catch (NumberFormatException e) { return false; }
-        }
-    
-        // --- Convert to HKD for balance check ---
-        double amountHKD = currency.equals("HKD") ? amount : amount * 1.13;
-    
-        // --- Check account balance ---
-        double available = bankDatabase.getAvailableBalance(currentAccountNumber);
-        if (amountHKD > available) {
-            guiScreen.displayMessageLine("");
-            guiScreen.displayMessageLine("✖ Insufficient funds in account.");
-            guiScreen.displayMessage("Available: ");
-            guiScreen.displayDollarAmount(available);
-            guiScreen.displayMessageLine("");
-            sleep(2000);
-            return false;
-        }
-    
-        // --- Check cash dispenser ---
-        if (!cashDispenser.isSufficientCashAvailable(amount)) {
-            guiScreen.displayMessageLine("✖ ATM has insufficient cash. Choose a smaller amount.");
-            sleep(2000);
-            return false;
-        }
-    
-        // --- Confirmation dialog ---
-        final int[] confirm = {JOptionPane.NO_OPTION};
-        String confirmMsg = String.format(
-            "Confirm withdrawal of %s%d?\n\nYour account will be debited HK$%.2f.",
-            sym, amount, amountHKD
-        );
-        try {
-            SwingUtilities.invokeAndWait(() ->
-                confirm[0] = JOptionPane.showConfirmDialog(
-                    this, confirmMsg,
-                    "Confirm Withdrawal", JOptionPane.YES_NO_OPTION)
-            );
-        } catch (Exception e) { return false; }
-    
-        if (confirm[0] != JOptionPane.YES_OPTION) {
-            guiScreen.displayMessageLine("Transaction cancelled.");
-            return false;
-        }
-    
-        // --- Execute debit and dispense ---
-        bankDatabase.debit(currentAccountNumber, amountHKD);
-        cashDispenser.dispenseCash(amount);
-    
-        guiScreen.displayMessageLine("");
-        guiScreen.displayMessageLine("☒ Withdrawal successful!");
-        guiScreen.displayMessage("Amount dispensed: " + sym);
-        guiScreen.displayMessageLine(String.valueOf(amount));
-        guiScreen.displayMessage("New balance: ");
-        guiScreen.displayDollarAmount(bankDatabase.getAvailableBalance(currentAccountNumber));
-        guiScreen.displayMessageLine("");
-    
-        return true; // signals caller to show "take cash" message
-    }
+    // ── Withdrawal ───────────────────────────────────────────
+    private boolean doWithdraw() {
+        SwingUtilities.invokeLater(() -> setAtmState(STATE_WITHDRAW));
+        sleep(150);
 
-
-    /**
-     * Handles fund transfer: target account → currency →
-     * amount → balance check → confirmation → debit/credit.
-     */
-    private void performTransfer() {
-
-        // --- Target account ---
-        final String[] targetStr = {null};
-        try {
-            SwingUtilities.invokeAndWait(() ->
-                targetStr[0] = JOptionPane.showInputDialog(
-                    this,
-                    "Enter target account number\n(Test accounts: 12345, 98765):",
-                    "Transfer — Target Account",
-                    JOptionPane.QUESTION_MESSAGE)
-            );
-        } catch (Exception e) { return; }
-
-        if (targetStr[0] == null || targetStr[0].trim().isEmpty()) return;
-
-        int targetAcc;
-        try { targetAcc = Integer.parseInt(targetStr[0].trim()); }
-        catch (NumberFormatException e) {
-            guiScreen.displayMessageLine("  ✖  Invalid account number."); return;
-        }
-
-        // Validate target account exists
-        if (!bankDatabase.isAccountExist(targetAcc)) {
-            guiScreen.displayMessageLine("  ✖  Target account does not exist.");
-            return;
-        }
-
-        // Cannot transfer to own account
-        if (targetAcc == currentAccountNumber) {
-            guiScreen.displayMessageLine(
-                "  ✖  Cannot transfer to your own account.");
-            return;
-        }
-
-        // --- Currency ---
-        String[] currencies = {"HKD", "RMB"};
-        final int[] curIdx = {-1};
-        try {
-            SwingUtilities.invokeAndWait(() ->
-                curIdx[0] = JOptionPane.showOptionDialog(
-                    this, "Select transfer currency:",
-                    "Transfer — Currency",
-                    JOptionPane.DEFAULT_OPTION,
-                    JOptionPane.QUESTION_MESSAGE,
-                    null, currencies, currencies[0])
-            );
-        } catch (Exception e) { return; }
-
-        if (curIdx[0] == JOptionPane.CLOSED_OPTION) return;
-        String currency = currencies[curIdx[0]];
-
-        // --- Amount ---
-        final String[] amtStr = {null};
-        try {
-            SwingUtilities.invokeAndWait(() ->
-                amtStr[0] = JOptionPane.showInputDialog(
-                    this,
-                    "Enter transfer amount in " + currency + ":",
-                    "Transfer — Amount",
-                    JOptionPane.QUESTION_MESSAGE)
-            );
-        } catch (Exception e) { return; }
-
-        if (amtStr[0] == null) return;
+        String rawAmt = guiKeypad.getStringInput();
+        if ("CANCEL".equals(rawAmt)) return false;
 
         double amount;
-        try { amount = Double.parseDouble(amtStr[0].trim()); }
+        try { amount = Double.parseDouble(rawAmt); }
         catch (NumberFormatException e) {
-            guiScreen.displayMessageLine("  ✖  Invalid amount."); return;
+            guiScreen.displayMessageLine("\n  ✖ Invalid amount entered.");
+            sleep(1500);
+            return false;
         }
 
-        double amountHKD = currency.equals("HKD") ? amount : amount * 1.13;
+        SwingUtilities.invokeLater(() -> amountGridPanel.setVisible(false));
 
-        // --- Balance check ---
+        if (amount <= 0) {
+            guiScreen.displayMessageLine("\n  ✖ Amount must be positive.");
+            sleep(1500);
+            return false;
+        }
+
         double available = bankDatabase.getAvailableBalance(currentAccountNumber);
-        if (amountHKD > available) {
-            guiScreen.displayMessageLine("  ✖  Insufficient funds.");
-            guiScreen.displayMessage("     Available: ");
+        if (amount > available) {
+            clearDisplay();
+            appendDisplay("━━━━  WITHDRAWAL  ━━━━");
+            guiScreen.displayMessageLine("\n  ✖ Insufficient funds.");
+            guiScreen.displayMessage("  Available: ");
             guiScreen.displayDollarAmount(available);
-            guiScreen.displayMessageLine("");
+            guiScreen.displayMessageLine("\n\n  Press  Enter  to return.");
+            SwingUtilities.invokeLater(() -> setKeypadEnabled(true));
+            guiKeypad.getStringInput();
+            return false;
+        }
+
+        if (!cashDispenser.isSufficientCashAvailable((int) amount)) {
+            guiScreen.displayMessageLine("\n  ✖ ATM cannot dispense that amount.");
+            sleep(2000);
+            return false;
+        }
+
+        // Confirmation
+        clearDisplay();
+        appendDisplay("━━━━  CONFIRM WITHDRAWAL  ━━━━");
+        guiScreen.displayMessageLine(
+            String.format("\n  Withdraw HK$%.2f from account %d?",
+                          amount, currentAccountNumber));
+        guiScreen.displayMessageLine("\n  Press  Enter  to confirm.");
+        guiScreen.displayMessageLine("  Press  Cancel  to abort.");
+        SwingUtilities.invokeLater(() -> setKeypadEnabled(true));
+
+        String conf = guiKeypad.getStringInput();
+        if ("CANCEL".equals(conf)) {
+            guiScreen.displayMessageLine("\n  Cancelled.");
+            sleep(1200);
+            return false;
+        }
+
+        bankDatabase.debit(currentAccountNumber, amount);
+        cashDispenser.dispenseCash((int) amount);
+
+        clearDisplay();
+        appendDisplay("━━━━  WITHDRAWAL  ━━━━");
+        guiScreen.displayMessageLine("\n  ✔  Cash dispensed!");
+        guiScreen.displayMessage    ("  Amount : HK$");
+        guiScreen.displayMessageLine(String.format("%.2f", amount));
+        guiScreen.displayMessage    ("  Balance: ");
+        guiScreen.displayDollarAmount(
+            bankDatabase.getAvailableBalance(currentAccountNumber));
+        guiScreen.displayMessageLine("\n\n  ▶  Please take your cash.");
+        setStatus("Cash dispensed. Please take your cash.");
+
+        sleep(3000);
+        SwingUtilities.invokeLater(() -> setAtmState(STATE_EJECT_CARD));
+        sleep(3500);
+        SwingUtilities.invokeLater(() -> setAtmState(STATE_WELCOME));
+        return true;
+    }
+
+    // ── Transfer ─────────────────────────────────────────────
+    private void doTransfer() {
+
+        // Sub-step 1: target account
+        SwingUtilities.invokeLater(() -> {
+            currentState = STATE_TRANSFER;
+            clearDisplay();
+            appendDisplay("━━━━  TRANSFER FUNDS  ━━━━");
+            appendDisplay("");
+            appendDisplay("  Step 1 of 2:");
+            appendDisplay("  Type the TARGET account number");
+            appendDisplay("  and press  Enter .");
+            setStatus("Type target account number, press Enter");
+            setKeypadEnabled(true);
+        });
+        sleep(150);
+
+        String targetRaw = guiKeypad.getStringInput();
+        if ("CANCEL".equals(targetRaw)) {
+            guiScreen.displayMessageLine("\n  Cancelled.");
+            sleep(1000);
             return;
         }
 
-        // --- Confirmation ---
-        final int[] confirm = {JOptionPane.NO_OPTION};
-        String sym = currency.equals("HKD") ? "HK$" : "RMB ";
-        String confirmMsg = String.format(
-            "Transfer %s%.2f to account %d?\n\nAccount debited: HK$%.2f",
-            sym, amount, targetAcc, amountHKD);
-        try {
-            SwingUtilities.invokeAndWait(() ->
-                confirm[0] = JOptionPane.showConfirmDialog(
-                    this, confirmMsg,
-                    "Confirm Transfer", JOptionPane.YES_NO_OPTION)
-            );
-        } catch (Exception e) { return; }
-
-        if (confirm[0] != JOptionPane.YES_OPTION) {
-            guiScreen.displayMessageLine("  Transfer cancelled."); return;
+        int targetAcc;
+        try { targetAcc = Integer.parseInt(targetRaw.trim()); }
+        catch (NumberFormatException e) {
+            guiScreen.displayMessageLine("\n  ✖ Invalid account number.");
+            sleep(1500);
+            return;
         }
 
-        // --- Execute transfer ---
-        bankDatabase.debit(currentAccountNumber, amountHKD);
-        bankDatabase.credit(targetAcc, amountHKD);
+        if (!bankDatabase.isAccountExist(targetAcc)) {
+            clearDisplay();
+            appendDisplay("━━━━  TRANSFER FUNDS  ━━━━");
+            guiScreen.displayMessageLine(
+                "\n  ✖ Account " + targetAcc + " not found.");
+            guiScreen.displayMessageLine("  Press  Enter  to return.");
+            SwingUtilities.invokeLater(() -> setKeypadEnabled(true));
+            guiKeypad.getStringInput();
+            return;
+        }
 
-        guiScreen.displayMessageLine("");
-        guiScreen.displayMessageLine("  ✔  Transfer successful!");
-        guiScreen.displayMessage("     Amount:      " + sym);
+        if (targetAcc == currentAccountNumber) {
+            clearDisplay();
+            appendDisplay("━━━━  TRANSFER FUNDS  ━━━━");
+            guiScreen.displayMessageLine(
+                "\n  ✖ Cannot transfer to your own account.");
+            guiScreen.displayMessageLine("  Press  Enter  to return.");
+            SwingUtilities.invokeLater(() -> setKeypadEnabled(true));
+            guiKeypad.getStringInput();
+            return;
+        }
+
+        // Sub-step 2: amount
+        final int finalTarget = targetAcc;
+        SwingUtilities.invokeLater(() -> {
+            clearDisplay();
+            appendDisplay("━━━━  TRANSFER FUNDS  ━━━━");
+            appendDisplay("");
+            appendDisplay("  To account : " + finalTarget);
+            appendDisplay("");
+            appendDisplay("  Step 2 of 2:");
+            appendDisplay("  Type the AMOUNT (HKD) to transfer");
+            appendDisplay("  and press  Enter .");
+            appendDisplay("  (Decimals allowed, e.g. 150.50)");
+            setStatus("Type transfer amount, press Enter");
+        });
+        sleep(100);
+
+        String amtRaw = guiKeypad.getStringInput();
+        if ("CANCEL".equals(amtRaw)) {
+            guiScreen.displayMessageLine("\n  Cancelled.");
+            sleep(1000);
+            return;
+        }
+
+        double amount;
+        try { amount = Double.parseDouble(amtRaw.trim()); }
+        catch (NumberFormatException e) {
+            guiScreen.displayMessageLine("\n  ✖ Invalid amount.");
+            sleep(1500);
+            return;
+        }
+
+        if (amount <= 0) {
+            guiScreen.displayMessageLine("\n  ✖ Amount must be positive.");
+            sleep(1500);
+            return;
+        }
+
+        double available = bankDatabase.getAvailableBalance(currentAccountNumber);
+        if (amount > available) {
+            clearDisplay();
+            appendDisplay("━━━━  TRANSFER FUNDS  ━━━━");
+            guiScreen.displayMessageLine("\n  ✖ Insufficient funds.");
+            guiScreen.displayMessage("  Available: ");
+            guiScreen.displayDollarAmount(available);
+            guiScreen.displayMessageLine("\n  Press  Enter  to return.");
+            SwingUtilities.invokeLater(() -> setKeypadEnabled(true));
+            guiKeypad.getStringInput();
+            return;
+        }
+
+        // Sub-step 3: confirmation
+        final double finalAmount = amount;
+        SwingUtilities.invokeLater(() -> {
+            clearDisplay();
+            appendDisplay("━━━━  CONFIRM TRANSFER  ━━━━");
+            appendDisplay("");
+            appendDisplay("  From    : " + currentAccountNumber);
+            appendDisplay("  To      : " + finalTarget);
+            appendDisplay(String.format("  Amount  : HK$%.2f", finalAmount));
+            appendDisplay("");
+            appendDisplay("  Press  Enter  to CONFIRM");
+            appendDisplay("  Press  Cancel  to ABORT");
+            setStatus("Enter = confirm, Cancel = abort");
+            setKeypadEnabled(true);
+        });
+        sleep(100);
+
+        String conf = guiKeypad.getStringInput();
+        if ("CANCEL".equals(conf)) {
+            clearDisplay();
+            appendDisplay("━━━━  TRANSFER FUNDS  ━━━━");
+            guiScreen.displayMessageLine("\n  Transfer aborted.");
+            sleep(1500);
+            return;
+        }
+
+        // Execute
+        bankDatabase.debit (currentAccountNumber, amount);
+        bankDatabase.credit(finalTarget,          amount);
+
+        clearDisplay();
+        appendDisplay("━━━━  TRANSFER COMPLETE  ━━━━");
+        guiScreen.displayMessageLine("\n  ✔  Transfer successful!");
+        guiScreen.displayMessageLine("  To account : " + finalTarget);
+        guiScreen.displayMessage    ("  Amount     : HK$");
         guiScreen.displayMessageLine(String.format("%.2f", amount));
-        guiScreen.displayMessageLine("     To account: " + targetAcc);
-        guiScreen.displayMessage("     New balance: ");
+        guiScreen.displayMessage    ("  New balance: ");
         guiScreen.displayDollarAmount(
             bankDatabase.getAvailableBalance(currentAccountNumber));
-        guiScreen.displayMessageLine("");
-        guiScreen.displayMessageLine("  Press ENTER to return to menu.");
-        guiKeypad.getInput(); // wait for acknowledgement
+        guiScreen.displayMessageLine("\n\n  Press  Enter  to return to menu.");
+        setStatus("Transfer complete.");
+        SwingUtilities.invokeLater(() -> setKeypadEnabled(true));
+        guiKeypad.getStringInput();
     }
 
     // =========================================================
-    // DISPLAY HELPERS  (safe to call from any thread)
+    // HELPERS
     // =========================================================
-
-    /** Clear the display area (runs on EDT). */
     private void clearDisplay() {
         SwingUtilities.invokeLater(() -> displayArea.setText(""));
     }
 
-    /** Append a line to the display area (runs on EDT). */
     private void appendDisplay(String line) {
         SwingUtilities.invokeLater(() -> displayArea.append(line + "\n"));
     }
 
-    /** Update the status bar label (runs on EDT). */
     private void setStatus(String msg) {
-        SwingUtilities.invokeLater(() -> statusLabel.setText(" " + msg));
+        SwingUtilities.invokeLater(() -> statusLabel.setText("  " + msg));
     }
 
-    /** Enable or disable all keypad buttons. */
-    private void setKeypadEnabled(boolean enabled) {
+    private void setKeypadEnabled(boolean on) {
         SwingUtilities.invokeLater(() -> {
-            for (JButton b : numButtons) if (b != null) b.setEnabled(enabled);
-            enterBtn.setEnabled(enabled);
-            clearBtn.setEnabled(enabled);
-            cancelBtn.setEnabled(enabled);
+            for (JButton b : digitBtns) if (b != null) b.setEnabled(on);
+            if (dotBtn        != null) dotBtn.setEnabled(on);
+            if (doubleZeroBtn != null) doubleZeroBtn.setEnabled(on);
+            if (enterBtn      != null) enterBtn.setEnabled(on);
+            if (clearBtn      != null) clearBtn.setEnabled(on);
+            if (cancelBtn     != null) cancelBtn.setEnabled(on);
         });
     }
 
-    /** Pause the current thread without checked exception noise. */
+    private void setSideButtonsEnabled(boolean on) {
+        SwingUtilities.invokeLater(() -> {
+            for (JButton b : leftBtns)  if (b != null) b.setEnabled(on);
+            for (JButton b : rightBtns) if (b != null) b.setEnabled(on);
+        });
+    }
+
     private void sleep(long ms) {
         try { Thread.sleep(ms); }
         catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -1025,18 +997,10 @@ public class ATMGUI extends JFrame {
     // =========================================================
     // ENTRY POINT
     // =========================================================
-
-    /**
-     * Launch the ATM GUI on the Event Dispatch Thread.
-     * The existing ATMCaseStudy.main() can also call this directly.
-     */
     public static void main(String[] args) {
-        // Apply system look-and-feel for native OS feel
         try {
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-        } catch (Exception ignored) { /* fall back to Metal L&F */ }
-
-        // All Swing objects must be created on the EDT
-        SwingUtilities.invokeLater(() -> new ATMGUI());
+        } catch (Exception ignored) {}
+        SwingUtilities.invokeLater(ATMGUI::new);
     }
 }
