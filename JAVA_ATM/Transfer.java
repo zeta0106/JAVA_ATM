@@ -1,6 +1,7 @@
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Scanner;
 
 public class Transfer extends Transaction
 {
@@ -84,7 +85,7 @@ public class Transfer extends Transaction
          return;
       }
 
-      // --- Step 5: Get transfer amount ---
+      // --- Step 5: Get transfer amount (NOW SUPPORTS DECIMAL VALUES) ---
       transferAmount = promptForTransferAmount();
       if ( transferAmount == CANCELED )
       {
@@ -283,15 +284,101 @@ public class Transfer extends Transaction
       }
    }
 
-   // ====== Prompt for transfer amount ======
+   // ====== UPDATED: Prompt for transfer amount (NOW SUPPORTS DECIMAL VALUES) ======
+   /**
+    * Prompts the user to enter a transfer amount that can include decimal values.
+    * 
+    * CHANGES FROM ORIGINAL:
+    * - Original: Only accepted integers via keypad.getInput()
+    * - Updated: Uses Scanner for decimal input (e.g., 9.90, 99.99, 1000.50)
+    * 
+    * VALIDATION:
+    * - Amount must be positive (> 0)
+    * - Decimal places are allowed and preserved
+    * - Entering 0 will cancel the transaction
+    * - Invalid input shows error and prompts again
+    * 
+    * EXAMPLES OF VALID INPUT:
+    * - 100 (interpreted as 100.00)
+    * - 9.90 (nine dollars and ninety cents)
+    * - 9.99 (nine dollars and ninety-nine cents)
+    * - 1500.50 (fifteen hundred and fifty cents)
+    * - 0.99 (ninety-nine cents)
+    * 
+    * @return double - The transfer amount with decimal precision, or 0 if canceled
+    */
    private double promptForTransferAmount()
    {
       Screen screen = getScreen();
+      
       screen.displayMessageLine(
          "\nPlease enter the transfer amount" );
+      screen.displayMessageLine( "(Decimal amounts accepted, e.g., 9.90)" );
       screen.displayMessageLine( "(or 0 to cancel): " );
-      int input = keypad.getInput();
-      return ( double ) input;
+
+      // Use Scanner to read decimal input from System.in
+      // This allows the user to input values like 9.90, 99.99, etc.
+      Scanner scanner = new Scanner( System.in );
+      
+      while ( true )
+      {
+         try
+         {
+            // Attempt to read the next double from user input
+            if ( scanner.hasNextDouble() )
+            {
+               double amount = scanner.nextDouble();
+               
+               // Cancel if user enters 0
+               if ( amount == 0 )
+               {
+                  return CANCELED; // Return CANCELED sentinel (0)
+               }
+               
+               // Validate: amount must be positive
+               if ( amount < 0 )
+               {
+                  screen.displayMessageLine(
+                     "\nError: Amount cannot be negative. Please try again." );
+                  continue;
+               }
+               
+               // Validate: amount must not exceed a reasonable maximum
+               if ( amount > 999999.99 )
+               {
+                  screen.displayMessageLine(
+                     "\nError: Amount exceeds maximum limit (HK$999,999.99)." );
+                  screen.displayMessageLine( "Please try again." );
+                  continue;
+               }
+               
+               // Round to 2 decimal places to avoid floating-point precision issues
+               // Example: 9.995 becomes 10.00, 9.994 becomes 9.99
+               amount = Math.round( amount * 100.0 ) / 100.0;
+               
+               // Valid amount received
+               screen.displayMessageLine(
+                  "\nAmount entered: HK$" + String.format( "%.2f", amount ) );
+               return amount;
+            }
+            else
+            {
+               // Invalid input (not a number)
+               String invalid = scanner.next(); // consume the invalid input
+               screen.displayMessageLine(
+                  "\nError: '" + invalid
+                  + "' is not a valid number. Please enter a decimal amount." );
+               screen.displayMessage( "Try again: " );
+            }
+         }
+         catch ( Exception e )
+         {
+            // Handle any unexpected exceptions
+            screen.displayMessageLine(
+               "\nError reading input. Please try again." );
+            scanner.nextLine(); // Clear the input buffer
+         }
+      }
    }
 
    // ====== Suspicious Activity Detection ======
@@ -350,11 +437,19 @@ public class Transfer extends Transaction
    }
 
    // ====== Inner class for Transfer Record ======
+   /**
+    * UPDATED: TransferRecord now stores decimal amounts with precision
+    * 
+    * Changes:
+    * - originalAmount: Changed from int to double (supports 9.90, 99.99, etc.)
+    * - All amount fields now use double for decimal precision
+    * - toString() method formats amounts to 2 decimal places
+    */
    private static class TransferRecord
    {
       private int fromAccount;
       private int toAccount;
-      private double originalAmount;
+      private double originalAmount;  // CHANGED: from int to double
       private String currency;
       private double amountInHKD;
       private double fee;
@@ -366,7 +461,7 @@ public class Transfer extends Transaction
       {
          fromAccount = from;
          toAccount = to;
-         originalAmount = originalAmt;
+         originalAmount = originalAmt;  // Now accepts decimal values
          currency = curr;
          amountInHKD = hkdAmt;
          fee = transferFee;
@@ -382,6 +477,7 @@ public class Transfer extends Transaction
       {
          String timeStr = timestamp.format(
             DateTimeFormatter.ofPattern( "yyyy-MM-dd HH:mm:ss" ) );
+         // Format decimal amounts to 2 decimal places
          return String.format(
             "[%s] From: %d -> To: %d | %s %.2f (HK$%.2f) | Fee: HK$%.2f",
             timeStr, fromAccount, toAccount, currency,
