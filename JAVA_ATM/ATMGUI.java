@@ -98,6 +98,7 @@ public class ATMGUI extends JFrame {
     private static final int STATE_TRANSFER      = 5;
     private static final int STATE_BALANCE       = 6;
     private static final int STATE_EJECT_CARD    = 7;
+    private static final int STATE_POST_WITHDRAW = 8;
 
     // Exchange Rate
     private static final double RMB_TO_HKD_RATE = 1.13;
@@ -117,7 +118,7 @@ public class ATMGUI extends JFrame {
     private JButton   enterBtn, clearBtn, cancelBtn;
     private JLabel    statusLabel;
 
-    // Preset amounts: index 0=200(TL), 1=800(TR), 2=400(BL), 3=1000(BR)
+    // Preset amounts
     private static final int[] PRESET_AMOUNTS = {200, 800, 400, 1000};
 
     private final StringBuilder inputBuffer = new StringBuilder();
@@ -457,7 +458,7 @@ public class ATMGUI extends JFrame {
     // ── Input helpers ─────────────────────────────────────────
     private void appendInput(String ch) {
         inputBuffer.append(ch);
-        // Hide input if we're in PIN entry mode
+        // Show masked input during PIN entry, plain text otherwise
         if (currentState == STATE_ENTER_PIN) {
             inputBarField.setText("*".repeat(inputBuffer.length()));
         } else {
@@ -476,7 +477,7 @@ public class ATMGUI extends JFrame {
     private void handleClear() {
         if (inputBuffer.length() > 0) {
             inputBuffer.deleteCharAt(inputBuffer.length() - 1);
-            // Hide input if we're in PIN entry mode
+            // Keep masking consistent after clear
             if (currentState == STATE_ENTER_PIN) {
                 inputBarField.setText("*".repeat(inputBuffer.length()));
             } else {
@@ -513,6 +514,13 @@ public class ATMGUI extends JFrame {
                 if (guiKeypad != null)
                     guiKeypad.submitInput(String.valueOf(PRESET_AMOUNTS[idx]));
                 break;
+            case STATE_POST_WITHDRAW:
+                if (guiKeypad != null) {
+                    int option = idx + 1;
+                    if (option <= 3)
+                        guiKeypad.submitInput(String.valueOf(option));
+                }
+                break;
             default:
                 break;
         }
@@ -527,8 +535,12 @@ public class ATMGUI extends JFrame {
         SwingUtilities.invokeLater(() ->
             amountGridPanel.setVisible(state == STATE_WITHDRAW));
 
-        boolean kbEnabled   = (state != STATE_EJECT_CARD && state != STATE_MAIN_MENU);
-        boolean sideEnabled = (state == STATE_MAIN_MENU  || state == STATE_WITHDRAW);
+        boolean kbEnabled   = (state != STATE_EJECT_CARD
+                             && state != STATE_MAIN_MENU
+                             && state != STATE_POST_WITHDRAW);
+        boolean sideEnabled = (state == STATE_MAIN_MENU
+                             || state == STATE_WITHDRAW
+                             || state == STATE_POST_WITHDRAW);
         setKeypadEnabled(kbEnabled);
         setSideButtonsEnabled(sideEnabled);
 
@@ -604,6 +616,20 @@ public class ATMGUI extends JFrame {
                 setStatus("Viewing balance...");
                 break;
 
+            case STATE_POST_WITHDRAW:
+                clearDisplay();
+                appendDisplay("━━━━  TRANSACTION COMPLETE  ━━━━");
+                appendDisplay("");
+                appendDisplay("  Would you like to:");
+                appendDisplay("");
+                appendDisplay("  1 - Print receipt & Log out");
+                appendDisplay("  2 - Perform another transaction");
+                appendDisplay("  3 - Log out directly");
+                appendDisplay("");
+                appendDisplay("  Use side buttons to select.");
+                setStatus("Select an option with the side buttons");
+                break;
+
             case STATE_EJECT_CARD:
                 clearDisplay();
                 appendDisplay("━━━━  SESSION ENDED  ━━━━");
@@ -634,32 +660,25 @@ public class ATMGUI extends JFrame {
         t.start();
     }
 
-    // =========================================================
-    // *** MODIFIED: runATMSession ***
-    // Added account number validation loop before PIN entry
-    // =========================================================
     private void runATMSession() {
 
-        // ----------------------------------------------------------
-        // STEP 1: Account number — loop until valid or cancelled
-        // ----------------------------------------------------------
+        // =====================================================
+        // STEP 1: Account number — loop until valid or cancel
+        // =====================================================
         int accountNumber = 0;
-        while (true) {
-            // Get input from user
-            String rawInput = guiKeypad.getStringInput();
+        boolean accountFound = false;
 
-            // User pressed Cancel → go back to welcome
-            if ("CANCEL".equals(rawInput)) {
+        while (!accountFound) {
+            String rawAcc = guiKeypad.getStringInput();
+
+            if ("CANCEL".equals(rawAcc)) {
                 SwingUtilities.invokeLater(() -> setAtmState(STATE_WELCOME));
                 return;
             }
 
-            // Try to parse as integer
-            int parsedAccount;
             try {
-                parsedAccount = Integer.parseInt(rawInput.trim());
+                accountNumber = Integer.parseInt(rawAcc.trim());
             } catch (NumberFormatException e) {
-                // Not a valid number at all
                 SwingUtilities.invokeLater(() -> {
                     clearDisplay();
                     appendDisplay("━━━━  ACCOUNT NUMBER  ━━━━");
@@ -667,11 +686,41 @@ public class ATMGUI extends JFrame {
                     appendDisplay("  ✖ Invalid input.");
                     appendDisplay("  Please enter numbers only.");
                     appendDisplay("");
-                    appendDisplay("  Try again or press Cancel.");
+                    appendDisplay("  (Test: 12345  PIN: 54321)");
+                    appendDisplay("  (Test: 98765  PIN: 56789)");
+                    setStatus("Invalid input — enter account number again");
+                    setKeypadEnabled(true);
                 });
-                setStatus("Invalid input. Enter numbers only.");
+                sleep(1500);
+                SwingUtilities.invokeLater(() -> {
+                    clearDisplay();
+                    appendDisplay("━━━━  ACCOUNT NUMBER  ━━━━");
+                    appendDisplay("");
+                    appendDisplay("  Enter your account number");
+                    appendDisplay("  and press Enter.");
+                    appendDisplay("");
+                    appendDisplay("  (Test: 12345  PIN: 54321)");
+                    appendDisplay("  (Test: 98765  PIN: 56789)");
+                    setStatus("Enter account number, press Enter");
+                });
+                continue;
+            }
+
+            if (!bankDatabase.isAccountExist(accountNumber)) {
+                final int badAcc = accountNumber;
+                SwingUtilities.invokeLater(() -> {
+                    clearDisplay();
+                    appendDisplay("━━━━  ACCOUNT NUMBER  ━━━━");
+                    appendDisplay("");
+                    appendDisplay("  ✖ Account " + badAcc + " not found.");
+                    appendDisplay("  Please try again.");
+                    appendDisplay("");
+                    appendDisplay("  (Test: 12345  PIN: 54321)");
+                    appendDisplay("  (Test: 98765  PIN: 56789)");
+                    setStatus("Account not found — try again or press Cancel");
+                    setKeypadEnabled(true);
+                });
                 sleep(2000);
-                // Restore account entry screen
                 SwingUtilities.invokeLater(() -> {
                     clearDisplay();
                     appendDisplay("━━━━  ACCOUNT NUMBER  ━━━━");
@@ -681,53 +730,19 @@ public class ATMGUI extends JFrame {
                     appendDisplay("");
                     appendDisplay("  (Test: 12345  PIN: 54321)");
                     appendDisplay("  (Test: 98765  PIN: 56789)");
-                    setKeypadEnabled(true);
+                    setStatus("Enter account number, press Enter");
                 });
-                setStatus("Enter account number, press Enter");
-                continue; // ask again
+                continue;
             }
 
-            // Check if account exists in the database
-            if (!bankDatabase.isAccountExist(parsedAccount)) {
-                // Account does not exist
-                SwingUtilities.invokeLater(() -> {
-                    clearDisplay();
-                    appendDisplay("━━━━  ACCOUNT NUMBER  ━━━━");
-                    appendDisplay("");
-                    appendDisplay("  ✖ Account not found.");
-                    appendDisplay("  The number you entered does");
-                    appendDisplay("  not exist in our system.");
-                    appendDisplay("");
-                    appendDisplay("  Please try again or Cancel.");
-                });
-                setStatus("Account not found. Try again.");
-                sleep(2500);
-                // Restore account entry screen
-                SwingUtilities.invokeLater(() -> {
-                    clearDisplay();
-                    appendDisplay("━━━━  ACCOUNT NUMBER  ━━━━");
-                    appendDisplay("");
-                    appendDisplay("  Enter your account number");
-                    appendDisplay("  and press Enter.");
-                    appendDisplay("");
-                    appendDisplay("  (Test: 12345  PIN: 54321)");
-                    appendDisplay("  (Test: 98765  PIN: 56789)");
-                    setKeypadEnabled(true);
-                });
-                setStatus("Enter account number, press Enter");
-                continue; // ask again
-            }
-
-            // Valid account found — break the loop
-            accountNumber = parsedAccount;
-            break;
+            accountFound = true;
         }
 
         currentAccountNumber = accountNumber;
 
-        // ----------------------------------------------------------
+        // =====================================================
         // STEP 2: PIN — up to 3 attempts
-        // ----------------------------------------------------------
+        // =====================================================
         SwingUtilities.invokeLater(() -> setAtmState(STATE_ENTER_PIN));
         sleep(150);
 
@@ -744,7 +759,7 @@ public class ATMGUI extends JFrame {
             }
             int pin = guiKeypad.getInput();
             if (bankDatabase.authenticateUser(accountNumber, pin)) {
-                authenticated     = true;
+                authenticated    = true;
                 userAuthenticated = true;
                 break;
             }
@@ -763,9 +778,9 @@ public class ATMGUI extends JFrame {
             return;
         }
 
-        // ----------------------------------------------------------
+        // =====================================================
         // STEP 3: Main menu loop
-        // ----------------------------------------------------------
+        // =====================================================
         SwingUtilities.invokeLater(() -> setAtmState(STATE_MAIN_MENU));
         sleep(150);
 
@@ -773,10 +788,10 @@ public class ATMGUI extends JFrame {
         while (running) {
             int choice = guiKeypad.getInput();
             switch (choice) {
-                case 1: doBalance();             break;
-                case 2: running = !doWithdraw(); break;
-                case 3: doTransfer();            break;
-                case 4: running = false;         break;
+                case 1: doBalance();              break;
+                case 2: running = !doWithdraw();  break;
+                case 3: doTransfer();             break;
+                case 4: running = false;          break;
                 default:
                     guiScreen.displayMessageLine("\n  ⚠ Use side buttons 1–4.");
                     break;
@@ -820,7 +835,9 @@ public class ATMGUI extends JFrame {
     // ── Withdrawal ───────────────────────────────────────────
     private boolean doWithdraw() {
 
+        // -------------------------------------------------
         // Step 1: Currency Selection
+        // -------------------------------------------------
         SwingUtilities.invokeLater(() -> {
             currentState = STATE_WITHDRAW;
             amountGridPanel.setVisible(false);
@@ -855,7 +872,9 @@ public class ATMGUI extends JFrame {
             return false;
         }
 
+        // -------------------------------------------------
         // Step 2: Amount Selection
+        // -------------------------------------------------
         SwingUtilities.invokeLater(() -> {
             currentState = STATE_WITHDRAW;
             clearDisplay();
@@ -891,7 +910,9 @@ public class ATMGUI extends JFrame {
             return false;
         }
 
+        // -------------------------------------------------
         // Step 3: Currency Conversion
+        // -------------------------------------------------
         final double withdrawalInHKD =
             currency.equals("HKD") ? amount : amount * RMB_TO_HKD_RATE;
 
@@ -907,7 +928,9 @@ public class ATMGUI extends JFrame {
             sleep(2000);
         }
 
+        // -------------------------------------------------
         // Step 4: Check available balance
+        // -------------------------------------------------
         double available = bankDatabase.getAvailableBalance(currentAccountNumber);
         if (withdrawalInHKD > available) {
             clearDisplay();
@@ -927,7 +950,9 @@ public class ATMGUI extends JFrame {
             return false;
         }
 
+        // -------------------------------------------------
         // Step 5: Confirmation
+        // -------------------------------------------------
         final double finalAmount = amount;
         clearDisplay();
         appendDisplay("━━━━  CONFIRM WITHDRAWAL  ━━━━");
@@ -944,6 +969,7 @@ public class ATMGUI extends JFrame {
                 String.format("\n  Withdraw HK$%.2f from account %d?",
                     finalAmount, currentAccountNumber));
         }
+
         guiScreen.displayMessageLine("\n  Press Enter to confirm.");
         guiScreen.displayMessageLine("  Press Cancel to abort.");
         SwingUtilities.invokeLater(() -> setKeypadEnabled(true));
@@ -955,7 +981,9 @@ public class ATMGUI extends JFrame {
             return false;
         }
 
+        // -------------------------------------------------
         // Step 6: Execute
+        // -------------------------------------------------
         bankDatabase.debit(currentAccountNumber, withdrawalInHKD);
         cashDispenser.dispenseCash((int) amount);
 
@@ -980,17 +1008,75 @@ public class ATMGUI extends JFrame {
         guiScreen.displayMessageLine("\n\n  ▶ Please take your cash.");
         setStatus("Cash dispensed. Please take your cash.");
 
-        sleep(3000);
-        SwingUtilities.invokeLater(() -> setAtmState(STATE_EJECT_CARD));
-        sleep(3500);
-        SwingUtilities.invokeLater(() -> setAtmState(STATE_WELCOME));
-        return true;
+        sleep(2500);
+
+        // -------------------------------------------------
+        // Step 7: Post-Withdrawal Menu
+        // -------------------------------------------------
+        SwingUtilities.invokeLater(() -> setAtmState(STATE_POST_WITHDRAW));
+        sleep(150);
+
+        final String receiptCurrency = currency;
+        final double receiptAmount   = finalAmount;
+        final double receiptHKD      = withdrawalInHKD;
+        final double receiptBalance  =
+            bankDatabase.getAvailableBalance(currentAccountNumber);
+
+        int postChoice = guiKeypad.getInput();
+
+        switch (postChoice) {
+            case 1:
+                printWithdrawalReceipt(receiptCurrency, receiptAmount,
+                    receiptHKD, receiptBalance);
+                sleep(3000);
+                SwingUtilities.invokeLater(() -> setAtmState(STATE_EJECT_CARD));
+                sleep(3500);
+                return true;
+
+            case 2:
+                return false;
+
+            case 3:
+            default:
+                SwingUtilities.invokeLater(() -> setAtmState(STATE_EJECT_CARD));
+                sleep(3500);
+                return true;
+        }
+    }
+
+    // ── Print Withdrawal Receipt ──────────────────────────────
+    private void printWithdrawalReceipt(String currency, double amount,
+                                         double amountInHKD, double balance) {
+        clearDisplay();
+        appendDisplay("━━━━  RECEIPT  ━━━━");
+        guiScreen.displayMessageLine("\n  ====== Withdrawal Receipt ======");
+        guiScreen.displayMessageLine(
+            "  Account  : " + currentAccountNumber);
+        if (currency.equals("RMB")) {
+            guiScreen.displayMessage("  Amount   : RMB ");
+            guiScreen.displayMessageLine(String.format("%.2f", amount));
+            guiScreen.displayMessage("  In HKD   : ");
+            guiScreen.displayDollarAmount(amountInHKD);
+            guiScreen.displayMessageLine("");
+            guiScreen.displayMessageLine("  Rate     : 1 RMB = 1.13 HKD");
+        } else {
+            guiScreen.displayMessage("  Amount   : ");
+            guiScreen.displayDollarAmount(amount);
+            guiScreen.displayMessageLine("");
+        }
+        guiScreen.displayMessage("  Balance  : ");
+        guiScreen.displayDollarAmount(balance);
+        guiScreen.displayMessageLine("\n  ================================");
+        guiScreen.displayMessageLine("  Thank you for using JAVA BANK ATM!");
+        setStatus("Receipt printed. Please take your card.");
     }
 
     // ── Transfer ─────────────────────────────────────────────
     private void doTransfer() {
 
+        // -------------------------------------------------
         // Sub-step 1: Target account
+        // -------------------------------------------------
         SwingUtilities.invokeLater(() -> {
             currentState = STATE_TRANSFER;
             clearDisplay();
@@ -1041,7 +1127,9 @@ public class ATMGUI extends JFrame {
 
         final int finalTarget = targetAcc;
 
+        // -------------------------------------------------
         // Sub-step 2: Currency Selection
+        // -------------------------------------------------
         SwingUtilities.invokeLater(() -> {
             clearDisplay();
             appendDisplay("━━━━  TRANSFER FUNDS  ━━━━");
@@ -1080,7 +1168,9 @@ public class ATMGUI extends JFrame {
             return;
         }
 
+        // -------------------------------------------------
         // Sub-step 3: Amount
+        // -------------------------------------------------
         SwingUtilities.invokeLater(() -> {
             clearDisplay();
             appendDisplay("━━━━  TRANSFER FUNDS  ━━━━");
@@ -1091,7 +1181,7 @@ public class ATMGUI extends JFrame {
             appendDisplay("  Step 3 of 3:");
             appendDisplay("  Type the AMOUNT (" + currency + ") to transfer");
             appendDisplay("  and press Enter.");
-            appendDisplay("  (Decimals allowed, e.g. 150.50)");
+            appendDisplay("  (Decimals allowed, e.g. 9.90, 150.50)");
             setStatus("Type transfer amount (" + currency + "), press Enter");
         });
         sleep(100);
@@ -1117,7 +1207,9 @@ public class ATMGUI extends JFrame {
             return;
         }
 
+        // -------------------------------------------------
         // Currency Conversion
+        // -------------------------------------------------
         final double transferInHKD =
             currency.equals("HKD") ? amount : amount * RMB_TO_HKD_RATE;
 
@@ -1133,7 +1225,9 @@ public class ATMGUI extends JFrame {
             sleep(2000);
         }
 
+        // -------------------------------------------------
         // Check balance
+        // -------------------------------------------------
         double available = bankDatabase.getAvailableBalance(currentAccountNumber);
         if (transferInHKD > available) {
             clearDisplay();
@@ -1147,7 +1241,9 @@ public class ATMGUI extends JFrame {
             return;
         }
 
+        // -------------------------------------------------
         // Sub-step 4: Confirmation
+        // -------------------------------------------------
         final double finalAmount = amount;
         final double finalInHKD  = transferInHKD;
         SwingUtilities.invokeLater(() -> {
@@ -1159,7 +1255,8 @@ public class ATMGUI extends JFrame {
             appendDisplay("  Currency : " + currency);
             if (currency.equals("RMB")) {
                 appendDisplay(String.format("  Amount   : RMB %.2f",  finalAmount));
-                appendDisplay(String.format("  Rate     : 1 RMB = %.2f HKD", RMB_TO_HKD_RATE));
+                appendDisplay(String.format("  Rate     : 1 RMB = %.2f HKD",
+                    RMB_TO_HKD_RATE));
                 appendDisplay(String.format("  In HKD   : HK$%.2f",  finalInHKD));
             } else {
                 appendDisplay(String.format("  Amount   : HK$%.2f",  finalAmount));
@@ -1182,7 +1279,9 @@ public class ATMGUI extends JFrame {
             return;
         }
 
+        // -------------------------------------------------
         // Execute transfer
+        // -------------------------------------------------
         bankDatabase.debit (currentAccountNumber, transferInHKD);
         bankDatabase.credit(finalTarget,          transferInHKD);
 
