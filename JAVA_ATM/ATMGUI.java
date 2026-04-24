@@ -457,7 +457,12 @@ public class ATMGUI extends JFrame {
     // ── Input helpers ─────────────────────────────────────────
     private void appendInput(String ch) {
         inputBuffer.append(ch);
-        inputBarField.setText(inputBuffer.toString());
+        // Hide input if we're in PIN entry mode
+        if (currentState == STATE_ENTER_PIN) {
+            inputBarField.setText("*".repeat(inputBuffer.length()));
+        } else {
+            inputBarField.setText(inputBuffer.toString());
+        }
     }
 
     private void handleEnter() {
@@ -471,7 +476,12 @@ public class ATMGUI extends JFrame {
     private void handleClear() {
         if (inputBuffer.length() > 0) {
             inputBuffer.deleteCharAt(inputBuffer.length() - 1);
-            inputBarField.setText(inputBuffer.toString());
+            // Hide input if we're in PIN entry mode
+            if (currentState == STATE_ENTER_PIN) {
+                inputBarField.setText("*".repeat(inputBuffer.length()));
+            } else {
+                inputBarField.setText(inputBuffer.toString());
+            }
         }
         setStatus("Cleared last digit.");
     }
