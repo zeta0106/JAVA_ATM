@@ -346,7 +346,8 @@ public class ATMGUI extends JFrame {
                 "<html><center><font color='#AAAAAA'>or<br>"
                         + "enter the amount and press "
                         + "<font color='#00FF00'><b>enter</b></font>"
-                        + " button</font></center></html>",
+                        + " button<br>"
+                        + "Amount must be a multiple of 100</font></center></html>",
                 SwingConstants.CENTER);
 
         hint.setFont(new Font("Arial", Font.PLAIN, 11));
@@ -715,6 +716,7 @@ public class ATMGUI extends JFrame {
                 appendDisplay("");
                 appendDisplay(" Select a preset amount with side buttons");
                 appendDisplay(" or type an amount and press Enter.");
+                appendDisplay(" Amount must be a multiple of 100.");
                 setStatus("Select or type amount, press Enter");
                 break;
 
@@ -813,7 +815,7 @@ public class ATMGUI extends JFrame {
                     setKeypadEnabled(true);
                 });
 
-                sleep(3000);
+                sleep(1500);
 
                 SwingUtilities.invokeLater(() -> {
                     clearDisplay();
@@ -846,7 +848,7 @@ public class ATMGUI extends JFrame {
                     setKeypadEnabled(true);
                 });
 
-                sleep(3000);
+                sleep(2000);
 
                 SwingUtilities.invokeLater(() -> {
                     clearDisplay();
@@ -909,7 +911,7 @@ public class ATMGUI extends JFrame {
                 setStatus("Card retained. Please contact bank.");
             });
 
-            sleep(4000);
+            sleep(3500);
 
             SwingUtilities.invokeLater(() -> setAtmState(STATE_WELCOME));
             return;
@@ -1037,7 +1039,7 @@ public class ATMGUI extends JFrame {
             currency = "RMB";
         } else {
             guiScreen.displayMessageLine("\n Invalid selection.");
-            sleep(3000);
+            sleep(1500);
             return false;
         }
 
@@ -1051,6 +1053,7 @@ public class ATMGUI extends JFrame {
             appendDisplay("");
             appendDisplay(" Select a preset amount with side buttons");
             appendDisplay(" or type an amount and press Enter.");
+            appendDisplay(" Amount must be a multiple of 100.");
             appendDisplay("");
             appendDisplay(" Preset amounts are in " + currency);
             amountGridPanel.setVisible(true);
@@ -1073,7 +1076,7 @@ public class ATMGUI extends JFrame {
             amount = Double.parseDouble(rawAmt);
         } catch (NumberFormatException e) {
             guiScreen.displayMessageLine("\n Invalid amount entered.");
-            sleep(3000);
+            sleep(1500);
             return false;
         }
 
@@ -1081,7 +1084,14 @@ public class ATMGUI extends JFrame {
 
         if (amount <= 0) {
             guiScreen.displayMessageLine("\n Amount must be positive.");
-            sleep(3000);
+            sleep(1500);
+            return false;
+        }
+
+        // Withdrawal amount must be a whole-number multiple of 100.
+        if (amount != Math.floor(amount) || ((int) amount) % 100 != 0) {
+            guiScreen.displayMessageLine("\n Withdrawal amount must be a multiple of 100.");
+            sleep(2000);
             return false;
         }
 
@@ -1125,7 +1135,7 @@ public class ATMGUI extends JFrame {
 
         if (!cashDispenser.isSufficientCashAvailable((int) amount)) {
             guiScreen.displayMessageLine("\n ATM cannot dispense that amount.");
-            sleep(3000);
+            sleep(2000);
             return false;
         }
 
@@ -1159,7 +1169,7 @@ public class ATMGUI extends JFrame {
 
         if ("CANCEL".equals(conf)) {
             guiScreen.displayMessageLine("\n Cancelled.");
-            sleep(1500);
+            sleep(1200);
             return false;
         }
 
@@ -1191,7 +1201,7 @@ public class ATMGUI extends JFrame {
 
         setStatus("Withdrawal approved.");
 
-        sleep(3000);
+        sleep(2000);
 
         // -------------------------------------------------
         // Step 7: Post-Withdrawal Menu
@@ -1215,7 +1225,7 @@ public class ATMGUI extends JFrame {
                         receiptHKD,
                         receiptBalance);
 
-                sleep(3000);
+                sleep(2500);
 
                 completeWithdrawalLogoutSequence(finalAmount, receiptCurrency);
 
@@ -1230,7 +1240,7 @@ public class ATMGUI extends JFrame {
                 appendDisplay("");
                 appendDisplay(" Returning to main menu...");
                 setStatus("Returning to main menu.");
-                sleep(5000);
+                sleep(1500);
                 return false;
 
             case 3:
@@ -1248,37 +1258,45 @@ public class ATMGUI extends JFrame {
         setKeypadEnabled(false);
         setSideButtonsEnabled(false);
 
-        clearDisplay();
-        appendDisplay("-------- CARD EJECTION --------");
-        appendDisplay("");
-        appendDisplay(" Please take your card.");
+        showScreenNow(
+                "-------- CARD EJECTION --------\n\n"
+                        + " Please take your card.\n"
+        );
         setStatus("Please take your card.");
+        sleep(4000);
 
-        sleep(3000);
-
-        clearDisplay();
-        appendDisplay("-------- CARD EJECTED --------");
-        appendDisplay("");
-        appendDisplay(" Card ejected.");
+        showScreenNow(
+                "-------- CARD EJECTED --------\n\n"
+                        + " Card ejected.\n"
+        );
         setStatus("Card ejected.");
+        sleep(2500);
 
-        sleep(3000);
-
-        clearDisplay();
-        appendDisplay("-------- CASH DISPENSING --------");
-        appendDisplay("");
-        appendDisplay(" Please take your cash.");
-        appendDisplay("");
+        String amountLine;
 
         if ("RMB".equals(currency)) {
-            appendDisplay(String.format(" Amount : RMB %.2f", amount));
+            amountLine = String.format(" Amount : RMB %.2f\n", amount);
         } else {
-            appendDisplay(String.format(" Amount : HK$%.2f", amount));
+            amountLine = String.format(" Amount : HK$%.2f\n", amount);
         }
 
+        showScreenNow(
+                "-------- CASH DISPENSING --------\n\n"
+                        + " Please take your cash.\n\n"
+                        + amountLine
+        );
         setStatus("Please take your cash.");
 
+        sleep(4000);
+
         cashDispenser.dispenseCash((int) amount);
+
+        showScreenNow(
+                "-------- CASH DISPENSED --------\n\n"
+                        + " Cash dispensed successfully.\n"
+                        + " Thank you for using JAVA BANK ATM.\n"
+        );
+        setStatus("Cash dispensed.");
 
         sleep(3000);
 
@@ -1348,7 +1366,7 @@ public class ATMGUI extends JFrame {
 
         if ("CANCEL".equals(targetRaw)) {
             guiScreen.displayMessageLine("\n Cancelled.");
-            sleep(3000);
+            sleep(1000);
             return;
         }
 
@@ -1358,7 +1376,7 @@ public class ATMGUI extends JFrame {
             targetAcc = Integer.parseInt(targetRaw.trim());
         } catch (NumberFormatException e) {
             guiScreen.displayMessageLine("\n Invalid account number.");
-            sleep(3000);
+            sleep(1500);
             return;
         }
 
@@ -1414,7 +1432,7 @@ public class ATMGUI extends JFrame {
 
         if ("CANCEL".equals(currencyInput)) {
             guiScreen.displayMessageLine("\n Cancelled.");
-            sleep(2000);
+            sleep(1000);
             return;
         }
 
@@ -1434,7 +1452,7 @@ public class ATMGUI extends JFrame {
             currency = "RMB";
         } else {
             guiScreen.displayMessageLine("\n Invalid currency selection.");
-            sleep(3000);
+            sleep(1500);
             return;
         }
 
@@ -1461,7 +1479,7 @@ public class ATMGUI extends JFrame {
 
         if ("CANCEL".equals(amtRaw)) {
             guiScreen.displayMessageLine("\n Cancelled.");
-            sleep(3000);
+            sleep(1000);
             return;
         }
 
@@ -1471,13 +1489,13 @@ public class ATMGUI extends JFrame {
             amount = Double.parseDouble(amtRaw.trim());
         } catch (NumberFormatException e) {
             guiScreen.displayMessageLine("\n Invalid amount.");
-            sleep(3000);
+            sleep(1500);
             return;
         }
 
         if (amount <= 0) {
             guiScreen.displayMessageLine("\n Amount must be positive.");
-            sleep(3000);
+            sleep(1500);
             return;
         }
 
@@ -1496,7 +1514,7 @@ public class ATMGUI extends JFrame {
             guiScreen.displayMessage(" Converted HKD : ");
             guiScreen.displayDollarAmount(transferInHKD);
             guiScreen.displayMessageLine("\n");
-            sleep(3000);
+            sleep(2000);
         }
 
         // -------------------------------------------------
@@ -1559,7 +1577,7 @@ public class ATMGUI extends JFrame {
             clearDisplay();
             appendDisplay("-------- TRANSFER FUNDS --------");
             guiScreen.displayMessageLine("\n Transfer aborted.");
-            sleep(3000);
+            sleep(1500);
             return;
         }
 
@@ -1601,6 +1619,18 @@ public class ATMGUI extends JFrame {
     // =========================================================
     // HELPERS
     // =========================================================
+    private void showScreenNow(String text) {
+        try {
+            if (SwingUtilities.isEventDispatchThread()) {
+                displayArea.setText(text);
+            } else {
+                SwingUtilities.invokeAndWait(() -> displayArea.setText(text));
+            }
+        } catch (Exception e) {
+            SwingUtilities.invokeLater(() -> displayArea.setText(text));
+        }
+    }
+
     private void clearDisplay() {
         SwingUtilities.invokeLater(() -> displayArea.setText(""));
     }
